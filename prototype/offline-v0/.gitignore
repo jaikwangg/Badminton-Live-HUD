@@ -1,0 +1,11 @@
+# วิดีโอ/เสียงจากคลิปจริง (repo เป็น public) และไฟล์ขนาดใหญ่
+data/source.mov
+data/*.mov
+data/*.mp4
+data/*.wav
+site/*.mp4
+data/dets_yolo11*.json
+out/
+*.pt
+__pycache__/
+fonts/

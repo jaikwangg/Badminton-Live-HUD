@@ -1,0 +1,333 @@
+<title>Badminton Live HUD</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans+Thai:wght@400;500;600&display=swap">
+<style>
+/* Layout: broadcast desk — video stage with live overlay on the left, court map + rally list on the right, player cards underneath. Single dark look. */
+:root{
+  --bg:#0a0f16; --panel:#111a26; --panel-2:#0d1520; --line:rgba(140,172,212,.22); --fg:#eef3f8; --muted:#a3b6cb;
+  --accent:#ffd75a; --live:#ff5d6c;
+  --p0:#3fd0f0; --p1:#4be3a0; --p2:#c39bff; --p3:#ff8a6b;
+  --f-num:'Barlow Condensed','Arial Narrow',sans-serif; --f-body:'IBM Plex Sans Thai','Noto Sans Thai',system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.5}
+.wrap{max-width:1360px;margin:0 auto;padding-block:20px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:18px}
+.num{font-family:var(--f-num);font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.lb{font-family:var(--f-num);font-weight:600;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+header{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px 24px;justify-content:space-between}
+.match{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.team{font-size:clamp(22px,3.2vw,34px);font-weight:600;line-height:1.1;text-wrap:balance}
+.team .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:middle}
+.vs{font-family:var(--f-num);font-weight:700;font-size:20px;color:var(--muted)}
+.meta{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:13px}
+.tag{border:1px solid var(--line);border-radius:4px;padding:2px 8px;white-space:nowrap}
+.tag.warn{border-color:rgba(255,215,90,.5);color:var(--accent)}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
+@media (max-width:980px){.grid{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.stage{display:flex;flex-direction:column;gap:10px;min-width:0}
+.vbox{position:relative;width:100%;aspect-ratio:1920/1078;max-width:100%;background:#000;border-radius:8px;overflow:hidden}
+.vbox video,.vbox canvas{position:absolute;inset:0;width:100%;height:100%}
+.vbox video{object-fit:fill}
+.hud{position:absolute;left:12px;top:12px;display:flex;gap:8px;pointer-events:none;flex-wrap:wrap;max-width:calc(100% - 24px)}
+.hcell{background:rgba(8,14,22,.84);border:1px solid var(--line);border-radius:6px;padding:6px 12px;display:flex;flex-direction:column;min-width:92px}
+.hcell .v{font-family:var(--f-num);font-variant-numeric:tabular-nums;font-size:clamp(20px,2.6vw,34px);font-weight:600;line-height:1.05}
+.hcell .v small{font-size:.5em;color:var(--muted);font-weight:500;margin-left:3px}
+.hcell.last .v{font-size:clamp(15px,1.8vw,22px);font-family:var(--f-body);font-weight:600}
+.est{display:inline-block;font-family:var(--f-num);font-size:11px;letter-spacing:.1em;color:var(--accent);border:1px solid rgba(255,215,90,.6);border-radius:3px;padding:0 5px;margin-left:6px;vertical-align:middle}
+.bigplay{position:absolute;inset:0;margin:auto;width:64px;height:64px;border-radius:50%;border:none;background:rgba(8,14,22,.75);color:var(--fg);cursor:pointer;display:grid;place-items:center}
+.bigplay:focus-visible,.btn:focus-visible,.rally:focus-visible,.scrub:focus-visible,.chk input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.transport{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.btn{font:inherit;font-weight:600;min-height:44px;min-width:44px;padding:0 14px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--fg);cursor:pointer;display:inline-flex;align-items:center;gap:8px}
+.btn:hover{background:#18243a}
+.time{font-family:var(--f-num);font-size:18px;color:var(--muted);min-width:96px}
+.scrub{position:relative;flex:1 1 280px;height:44px;cursor:pointer;min-width:0}
+.scrub .track{position:absolute;left:0;right:0;top:18px;height:8px;border-radius:4px;background:rgba(140,172,212,.18)}
+.scrub .seg{position:absolute;top:16px;height:12px;border-radius:3px;background:rgba(255,215,90,.32);border:1px solid rgba(255,215,90,.55)}
+.scrub .tick{position:absolute;top:10px;width:2px;height:6px;border-radius:1px}
+.scrub .head{position:absolute;top:8px;width:3px;height:28px;background:var(--fg);border-radius:2px;margin-left:-1px}
+.toggles{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:14px}
+.chk{display:inline-flex;align-items:center;gap:6px;min-height:44px;cursor:pointer}
+.chk input{width:18px;height:18px;accent-color:var(--accent)}
+aside{display:flex;flex-direction:column;gap:18px;min-width:0}
+.mapp{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.maphead{display:flex;justify-content:space-between;align-items:baseline}
+#map{width:100%;max-width:300px;aspect-ratio:300/560;align-self:center}
+.legend{display:flex;justify-content:space-between;font-size:13px;color:var(--muted)}
+.rallies{padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.rlist{display:flex;flex-direction:column;gap:6px;max-height:420px;overflow:auto}
+.rally{font:inherit;text-align:left;display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:8px 10px;min-height:44px;border-radius:6px;border:1px solid transparent;background:var(--panel-2);color:var(--fg);cursor:pointer}
+.rally:hover{border-color:var(--line)}
+.rally.on{border-color:rgba(255,215,90,.6);background:rgba(255,215,90,.08)}
+.rally .n{font-family:var(--f-num);font-weight:700;font-size:18px;width:28px}
+.rally .s{font-family:var(--f-num);font-size:17px;color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:6px}
+@media (max-width:480px){.cards{grid-template-columns:minmax(0,1fr)}}
+.card{overflow:hidden;display:flex;flex-direction:column}
+.card .stripe{height:4px}
+.card .body{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.card .top{display:flex;align-items:baseline;gap:8px}
+.card .nm{font-size:22px;font-weight:600}
+.card .sd{font-size:13px;color:var(--muted)}
+.card .kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px}
+.card .kv .v{font-family:var(--f-num);font-variant-numeric:tabular-nums;font-size:26px;font-weight:600;line-height:1.05}
+.card .kv .v small{font-size:14px;color:var(--muted);font-weight:500;margin-left:2px}
+.bar{height:6px;border-radius:3px;background:rgba(140,172,212,.18);overflow:hidden}
+.bar i{display:block;height:100%;border-radius:3px;width:0}
+.notes{padding:16px 18px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 28px}
+@media (max-width:760px){.notes{grid-template-columns:minmax(0,1fr)}}
+.notes h2{grid-column:1/-1;margin:0 0 4px;font-size:17px}
+.notes div{min-width:0}
+.notes h3{margin:6px 0 2px;font-size:14px;color:var(--fg)}
+.notes p{margin:0;color:var(--muted);font-size:14px;max-width:62ch}
+@media (max-width:640px){.hud{left:6px;top:6px;gap:4px}.hcell{padding:3px 7px;min-width:0}.hcell .lb{font-size:10px;letter-spacing:.06em}.hcell .v{font-size:17px}.hcell.last{display:none}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="match">
+      <span class="team"><span class="dot" style="background:var(--p0)"></span><span class="dot" style="background:var(--p1)"></span> ปั้น · พฤกษ</span>
+      <span class="vs">VS</span>
+      <span class="team"><span class="dot" style="background:var(--p2)"></span><span class="dot" style="background:var(--p3)"></span> ปลื้ม · ภูสิท</span>
+    </div>
+    <div class="meta">
+      <span class="tag">ประเภทคู่</span>
+      <span class="tag">คลิปจริง 1:18 · กล้องมือถือตั้งนิ่ง</span>
+      <span class="tag warn">Prototype · ประมวลผลหลังถ่าย</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="stage">
+      <div class="vbox" id="vbox">
+        <video id="v" src="clip720.mp4" playsinline preload="auto"></video>
+        <canvas id="ov" aria-hidden="true"></canvas>
+        <div class="hud" aria-live="off">
+          <div class="hcell"><span class="lb">Rally</span><span class="v" id="hRally">—</span></div>
+          <div class="hcell"><span class="lb">Rally time</span><span class="v" id="hTime">00.0<small>s</small></span></div>
+          <div class="hcell"><span class="lb">Shots</span><span class="v" id="hShots">0</span></div>
+          <div class="hcell last"><span class="lb">Last shot <span class="est">EST.</span></span><span class="v" id="hLast">—</span></div>
+        </div>
+        <button class="bigplay" id="big" aria-label="เล่นวิดีโอ"><svg width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12.5-7.5z" fill="currentColor"/></svg></button>
+      </div>
+      <div class="transport">
+        <button class="btn" id="play" aria-label="เล่น/หยุด"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path id="pIcon" d="M7 4.5v15l12.5-7.5z" fill="currentColor"/></svg></button>
+        <span class="time" id="clock">0:00.0</span>
+        <div class="scrub" id="scrub" role="slider" tabindex="0" aria-label="ตำแหน่งในคลิป" aria-valuemin="0" aria-valuemax="78" aria-valuenow="0">
+          <div class="track"></div>
+          <div id="segs"></div>
+          <div class="head" id="head"></div>
+        </div>
+      </div>
+      <div class="toggles">
+        <label class="chk"><input type="checkbox" id="tRing" checked> วงแหวน + ป้ายชื่อ</label>
+        <label class="chk"><input type="checkbox" id="tBox"> กรอบตรวจจับ</label>
+        <label class="chk"><input type="checkbox" id="tCourt"> เส้นคอร์ทที่คาลิเบรต</label>
+        <label class="chk"><input type="checkbox" id="tSlow"> สโลว์ 0.5×</label>
+      </div>
+      <section class="cards" id="cards"></section>
+    </section>
+
+    <aside>
+      <div class="panel mapp">
+        <div class="maphead"><span class="lb">Court map</span><span class="lb" id="mapT">—</span></div>
+        <canvas id="map" width="300" height="560" role="img" aria-label="ตำแหน่งผู้เล่นบนคอร์ทแบบมองจากด้านบน"></canvas>
+        <div class="legend"><span>↑ คู่แข่ง</span><span>ทีมเรา ↓</span></div>
+      </div>
+      <div class="panel rallies">
+        <span class="lb">Rallies · คลิกเพื่อข้ามไป</span>
+        <div class="rlist" id="rlist"></div>
+      </div>
+    </aside>
+  </main>
+
+  <section class="panel notes">
+    <h2>ตัวเลขมาจากไหน</h2>
+    <div><h3>ตำแหน่งและระยะวิ่ง</h3><p>YOLO11s-pose หาตำแหน่งข้อเท้าทุกเฟรม (30 fps) แล้วแปลงเป็นพิกัดบนพื้นด้วย homography ที่คาลิเบรตจากเส้นคอร์ท 10 จุด คลาดเคลื่อนไม่เกิน 6 ซม. ระยะวิ่งนับเฉพาะช่วงที่ขยับเร็วกว่า 0.35 m/s เพื่อตัดการสั่นของจุด</p></div>
+    <div><h3>แยกว่าใครเป็นใคร</h3><p>แบ่งฝั่งจากเส้นเน็ตทุกเฟรม แล้วแยกคนในฝั่งเดียวกันจากสีเสื้อ (กรมท่า vs น้ำเงินสด, ดำ vs ขาว) ร่วมกับตำแหน่งเฟรมก่อนหน้า</p></div>
+    <div><h3>Shot และ rally <span class="est">ทดลอง</span></h3><p>นับ shot เมื่อเสียงกระทบลูกเกิดพร้อมการเหวี่ยงแขนของผู้เล่นคอร์ทนี้ เพื่อกรองเสียงจากคอร์ทข้างๆ ออก วิธีนี้ยังพลาดช็อตเบาและช็อตฝั่งไกลไปไม่น้อย ช่วง rally ดูจากจังหวะที่ผู้เล่นฝั่งเราเคลื่อนที่ต่อเนื่องและมี shot อย่างน้อย 2 ครั้ง</p></div>
+    <div><h3>ความเร็วลูก <span class="est">EST.</span></h3><p>ยังไม่ได้ตามลูกจริง ค่านี้คือความเร็วเฉลี่ยบนพื้น = ระยะจากคนตีถึงคนรับ ÷ เวลาระหว่างสองช็อต จึงต่ำกว่าความเร็วตอนออกจากไม้มาก</p></div>
+    <div><h3>ข้อจำกัดของคลิปนี้</h3><p>กล้องตั้งต่ำ ผู้เล่นหน้าบังคนฝั่งไกลบ่อย ช่วงท้ายคอร์ทฝั่งเรา ~0.9 ม. อยู่นอกเฟรม ช่วงที่ตามไม่ได้จะไม่มีวงแหวนและไม่นับระยะ คนฝั่งไกลตัวเล็กในภาพ ตำแหน่งจึงแกว่งมากกว่า ระยะวิ่งฝั่งไกลอาจสูงเกินจริง</p></div>
+    <div><h3>ยังไม่มีในรอบนี้</h3><p>การตามลูกด้วย TrackNetV3 (ไฟล์โมเดลยังโหลดไม่ได้) และคะแนน ซึ่งตาม spec ให้คนคุมกดยืนยัน</p></div>
+  </section>
+</div>
+
+<script>
+const D = /*DATA*/null;
+const COLORS = ['#3fd0f0','#4be3a0','#c39bff','#ff8a6b'];
+const $ = id => document.getElementById(id);
+const v = $('v'), ov = $('ov'), octx = ov.getContext('2d'), map = $('map'), mctx = map.getContext('2d');
+const N = D.t.length, IW = D.img[0], IH = D.img[1];
+const shotsByP = [0,1,2,3].map(j => D.shots.filter(s => s.p === j));
+
+function idxAt(t){ let lo=0, hi=N-1; while(lo<hi){ const m=(lo+hi)>>1; if(D.t[m]<t) lo=m+1; else hi=m; } if(lo>0 && Math.abs(D.t[lo-1]-t)<Math.abs(D.t[lo]-t)) lo--; return lo; }
+function proj(X,Y){ const h=D.Hinv; const w=h[2][0]*X+h[2][1]*Y+h[2][2]; return [(h[0][0]*X+h[0][1]*Y+h[0][2])/w,(h[1][0]*X+h[1][1]*Y+h[1][2])/w]; }
+function fmt(t){ const m=Math.floor(t/60), s=t-m*60; return m+':'+(s<10?'0':'')+s.toFixed(1); }
+
+/* ---------- overlay ---------- */
+let W=0,H=0,dpr=1;
+function resize(){ const r=$('vbox').getBoundingClientRect(); dpr=window.devicePixelRatio||1; W=r.width; H=r.height; ov.width=Math.round(W*dpr); ov.height=Math.round(H*dpr); octx.setTransform(dpr,0,0,dpr,0,0); draw(); }
+new ResizeObserver(resize).observe($('vbox'));
+
+function ringPath(ctx,X,Y,r,sx,sy){ ctx.beginPath(); for(let k=0;k<=28;k++){ const a=k/28*Math.PI*2; const p=proj(X+Math.cos(a)*r, Y+Math.sin(a)*r); const x=p[0]*sx, y=p[1]*sy; k?ctx.lineTo(x,y):ctx.moveTo(x,y);} ctx.closePath(); }
+function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function courtLines(){
+  const L=[]; const seg=(a,b,c,d)=>L.push([a,b,c,d]);
+  for(const Y of [0,0.76,4.72,8.68,12.64,13.4]) seg(0,Y,6.1,Y);
+  for(const X of [0,0.46,5.64,6.1]) seg(X,0,X,13.4);
+  seg(3.05,0,3.05,4.72); seg(3.05,8.68,3.05,13.4);
+  return L;
+}
+const CL = courtLines();
+
+function draw(){
+  if(!W) return;
+  const t=v.currentTime, i=idxAt(t), sx=W/IW, sy=H/IH;
+  octx.clearRect(0,0,W,H);
+  if($('tCourt').checked){
+    octx.save(); octx.strokeStyle='rgba(255,215,90,.75)'; octx.lineWidth=1.5; octx.setLineDash([6,5]);
+    for(const [a,b,c,d] of CL){ const p=proj(a,b), q=proj(c,d); const n=20; octx.beginPath(); for(let k=0;k<=n;k++){ const pp=proj(a+(c-a)*k/n,b+(d-b)*k/n); const x=pp[0]*sx,y=pp[1]*sy; k?octx.lineTo(x,y):octx.moveTo(x,y);} octx.stroke(); }
+    octx.restore();
+  }
+  const order=[0,1,2,3].filter(j=>D.players[j].court[i]).sort((a,b)=>D.players[b].court[i][1]-D.players[a].court[i][1]);
+  for(const j of order){
+    const P=D.players[j], c=P.court[i], col=COLORS[j];
+    const recent=shotsByP[j].find(s=>t>=s.t && t-s.t<0.45);
+    if($('tRing').checked){
+      octx.save(); octx.shadowColor=col; octx.shadowBlur=14; octx.strokeStyle=col; octx.lineWidth=3;
+      ringPath(octx,c[0],c[1],0.42,sx,sy); octx.stroke();
+      if(recent){ const k=(t-recent.t)/0.45; octx.globalAlpha=1-k; octx.lineWidth=2; ringPath(octx,c[0],c[1],0.42+k*0.9,sx,sy); octx.stroke(); }
+      octx.restore();
+    }
+    const b=P.box[i];
+    if(b && $('tBox').checked){
+      const x1=b[0]*sx,y1=b[1]*sy,x2=b[2]*sx,y2=b[3]*sy, L=Math.min(18,(x2-x1)*.3);
+      octx.save(); octx.strokeStyle=col; octx.lineWidth=2;
+      octx.beginPath();
+      octx.moveTo(x1,y1+L);octx.lineTo(x1,y1);octx.lineTo(x1+L,y1); octx.moveTo(x2-L,y1);octx.lineTo(x2,y1);octx.lineTo(x2,y1+L);
+      octx.moveTo(x1,y2-L);octx.lineTo(x1,y2);octx.lineTo(x1+L,y2); octx.moveTo(x2-L,y2);octx.lineTo(x2,y2);octx.lineTo(x2,y2-L);
+      octx.stroke(); octx.restore();
+    }
+    if(b && $('tRing').checked){
+      const fs=Math.max(12,Math.min(18,W/70));
+      octx.font=`600 ${fs}px 'IBM Plex Sans Thai',sans-serif`;
+      const nm=P.name, sp=(P.speed[i]||0).toFixed(1)+' m/s';
+      octx.font=`600 ${fs}px 'IBM Plex Sans Thai',sans-serif`; const w1=octx.measureText(nm).width;
+      octx.font=`500 ${fs}px 'Barlow Condensed',sans-serif`; const w2=octx.measureText(sp).width;
+      const pw=w1+w2+28, ph=fs+12;
+      let x=(b[0]+b[2])/2*sx-pw/2, y=b[1]*sy-ph-8;
+      x=Math.max(4,Math.min(W-pw-4,x)); y=Math.max(4,y);
+      octx.save(); octx.fillStyle='rgba(8,14,22,.86)'; roundRect(octx,x,y,pw,ph,5); octx.fill();
+      octx.fillStyle=col; octx.fillRect(x,y,pw,3);
+      octx.fillStyle='#eef3f8'; octx.font=`600 ${fs}px 'IBM Plex Sans Thai',sans-serif`; octx.textBaseline='middle'; octx.fillText(nm,x+9,y+ph/2+2);
+      octx.fillStyle='#a3b6cb'; octx.font=`500 ${fs}px 'Barlow Condensed',sans-serif`; octx.fillText(sp,x+19+w1,y+ph/2+2);
+      if(recent){ octx.fillStyle='#ffd75a'; octx.font=`700 ${fs}px 'Barlow Condensed',sans-serif`; octx.fillText('SHOT',x,y-fs*0.7); }
+      octx.restore();
+    }
+  }
+  drawMap(i,t); updateHud(t,i);
+}
+
+/* ---------- court map ---------- */
+const MP={pad:20,s:(300-40)/6.1};
+function m2(X,Y){ return [MP.pad+X*MP.s, MP.pad+(13.4-Y)*MP.s]; }
+function drawMap(i,t){
+  const c=mctx; c.clearRect(0,0,300,560);
+  c.fillStyle='#12355b'; const a=m2(0,13.4), b=m2(6.1,0); c.fillRect(a[0],a[1],b[0]-a[0],b[1]-a[1]);
+  c.strokeStyle='rgba(232,240,248,.6)'; c.lineWidth=1.2;
+  for(const [x1,y1,x2,y2] of CL){ const p=m2(x1,y1), q=m2(x2,y2); c.beginPath(); c.moveTo(p[0],p[1]); c.lineTo(q[0],q[1]); c.stroke(); }
+  const n1=m2(-0.3,6.7), n2=m2(6.4,6.7); c.strokeStyle='#ffffff'; c.lineWidth=2.5; c.setLineDash([5,4]); c.beginPath(); c.moveTo(n1[0],n1[1]); c.lineTo(n2[0],n2[1]); c.stroke(); c.setLineDash([]);
+  for(let j=0;j<4;j++){
+    const P=D.players[j], col=COLORS[j];
+    c.strokeStyle=col; c.globalAlpha=.55; c.lineWidth=2; c.beginPath(); let started=false;
+    for(let k=Math.max(0,i-45);k<=i;k++){ const q=P.court[k]; if(!q){started=false;continue;} const p=m2(q[0],q[1]); if(!started){c.moveTo(p[0],p[1]);started=true;} else c.lineTo(p[0],p[1]); }
+    c.stroke(); c.globalAlpha=1;
+    const q=P.court[i]; if(!q) continue;
+    const p=m2(Math.max(-0.3,Math.min(6.4,q[0])),Math.max(-0.3,Math.min(13.7,q[1])));
+    c.fillStyle=col; c.beginPath(); c.arc(p[0],p[1],8,0,Math.PI*2); c.fill();
+    c.lineWidth=2; c.strokeStyle='#0a0f16'; c.stroke();
+    c.fillStyle='#eef3f8'; c.font="500 13px 'IBM Plex Sans Thai',sans-serif"; c.textBaseline='middle'; c.fillText(P.name,p[0]+12,p[1]+1);
+  }
+  $('mapT').textContent=fmt(t);
+}
+
+/* ---------- HUD + cards ---------- */
+function rallyAt(t){ return D.rallies.find(r=>t>=r.start && t<=r.end+0.6); }
+function updateHud(t,i){
+  const r=rallyAt(t);
+  if(r){
+    const sh=D.shots.filter(s=>s.rally===r.n && s.t<=t);
+    $('hRally').textContent=r.n;
+    const rt=Math.max(0,Math.min(t,r.end)-r.start);
+    $('hTime').innerHTML=rt.toFixed(1)+'<small>s</small>';
+    $('hShots').textContent=sh.length;
+    const last=[...sh].reverse().find(s=>s.avg_kmh_est);
+    $('hLast').textContent= last? `${D.players[last.p].name} · ${last.avg_kmh_est} km/h` : (sh.length? D.players[sh[sh.length-1].p].name : '—');
+  } else {
+    $('hRally').textContent='—'; $('hTime').innerHTML='—'; $('hShots').textContent='—'; $('hLast').textContent='ระหว่าง rally';
+  }
+  document.querySelectorAll('.rally').forEach(el=>el.classList.toggle('on', r && +el.dataset.n===r.n));
+  for(let j=0;j<4;j++){
+    const P=D.players[j];
+    $('sp'+j).innerHTML=(P.court[i]? (P.speed[i]||0).toFixed(1):'—')+'<small>m/s</small>';
+    $('ds'+j).innerHTML=P.dist[i].toFixed(1)+'<small>m</small>';
+    const ns=shotsByP[j].filter(s=>s.t<=t).length; $('sh'+j).textContent=ns;
+    let top=0; for(let k=0;k<=i;k+=1){ const s=P.speed[k]; if(s>top) top=s; } $('tp'+j).innerHTML=top.toFixed(1)+'<small>m/s</small>';
+    $('br'+j).style.width=Math.min(100,(P.court[i]?(P.speed[i]||0):0)/5*100)+'%';
+  }
+  const pct=t/(v.duration||D.t[N-1]); $('head').style.left=(pct*100)+'%';
+  $('scrub').setAttribute('aria-valuenow',t.toFixed(1)); $('clock').textContent=fmt(t);
+}
+
+function buildCards(){
+  const side=['ทีมเรา','ทีมเรา','คู่แข่ง','คู่แข่ง'];
+  $('cards').innerHTML=D.players.map((P,j)=>`
+    <article class="panel card">
+      <div class="stripe" style="background:${COLORS[j]}"></div>
+      <div class="body">
+        <div class="top"><span class="nm">${P.name}</span><span class="sd">${side[j]} · ${P.desc}</span></div>
+        <div class="bar" aria-hidden="true"><i id="br${j}" style="background:${COLORS[j]}"></i></div>
+        <div class="kv">
+          <div><div class="lb">Speed now</div><div class="v" id="sp${j}">—</div></div>
+          <div><div class="lb">Distance</div><div class="v" id="ds${j}">0</div></div>
+          <div><div class="lb">Shots</div><div class="v" id="sh${j}">0</div></div>
+          <div><div class="lb">Top speed</div><div class="v" id="tp${j}">0</div></div>
+        </div>
+        <div class="sd">ตามได้ ${Math.round(P.coverage*100)}% ของคลิป</div>
+      </div>
+    </article>`).join('');
+}
+function buildRallies(){
+  $('rlist').innerHTML=D.rallies.map(r=>`<button class="rally" data-n="${r.n}" data-t="${r.start}"><span class="n">${r.n}</span><span>${fmt(r.start)} – ${fmt(r.end)}</span><span class="s">${r.shots} shots</span></button>`).join('') || '<p class="sd">ไม่พบ rally</p>';
+  $('rlist').querySelectorAll('.rally').forEach(b=>b.addEventListener('click',()=>{ v.currentTime=+b.dataset.t; play(); }));
+  const dur=D.t[N-1];
+  $('segs').innerHTML=D.rallies.map(r=>`<div class="seg" style="left:${r.start/dur*100}%;width:${(r.end-r.start)/dur*100}%"></div>`).join('')+
+    D.shots.map(s=>`<div class="tick" style="left:${s.t/dur*100}%;background:${COLORS[s.p]}"></div>`).join('');
+}
+
+/* ---------- transport ---------- */
+function setIcon(){ $('pIcon').setAttribute('d', v.paused ? 'M7 4.5v15l12.5-7.5z' : 'M6 4.5h4v15H6zM14 4.5h4v15h-4z'); $('big').hidden=!v.paused; }
+function play(){ v.play().catch(()=>{}); }
+$('play').addEventListener('click',()=> v.paused?play():v.pause());
+$('big').addEventListener('click',play);
+v.addEventListener('play',setIcon); v.addEventListener('pause',setIcon);
+v.addEventListener('click',()=> v.paused?play():v.pause());
+v.addEventListener('seeked',draw); v.addEventListener('loadeddata',draw);
+$('tSlow').addEventListener('change',e=>{ v.playbackRate=e.target.checked?0.5:1; });
+['tRing','tBox','tCourt'].forEach(id=>$(id).addEventListener('change',draw));
+function seekFromEvent(e){ const r=$('scrub').getBoundingClientRect(); const x=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)); v.currentTime=x*(v.duration||D.t[N-1]); draw(); }
+let dragging=false;
+$('scrub').addEventListener('pointerdown',e=>{dragging=true; $('scrub').setPointerCapture(e.pointerId); seekFromEvent(e);});
+$('scrub').addEventListener('pointermove',e=>{ if(dragging) seekFromEvent(e); });
+$('scrub').addEventListener('pointerup',()=>dragging=false);
+$('scrub').addEventListener('keydown',e=>{ if(e.key==='ArrowRight'){v.currentTime+=2;e.preventDefault();} if(e.key==='ArrowLeft'){v.currentTime-=2;e.preventDefault();} });
+
+function loop(){ if(!v.paused) draw(); requestAnimationFrame(loop); }
+buildCards(); buildRallies(); setIcon(); resize(); requestAnimationFrame(loop);
+document.fonts && document.fonts.ready.then(draw);
+</script>
