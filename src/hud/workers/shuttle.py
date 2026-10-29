@@ -52,14 +52,15 @@ class ShuttleWorker:
 
     def _heartbeat(self) -> None:
         now = time.monotonic()
-        self.publisher.send(
-            HeartbeatMessage(
-                worker="shuttle",
-                ts=self.last_ts,
-                fps=self.processed / max(now - self.started, 1e-9),
-                proc_ms=self.last_proc_ms,
-            ).to_json()
-        )
+        message = HeartbeatMessage(
+            worker="shuttle",
+            ts=self.last_ts,
+            fps=self.processed / max(now - self.started, 1e-9),
+            proc_ms=self.last_proc_ms,
+        ).to_json()
+        self.publisher.send(message)
+        # The supervisor watches heartbeat lines on this worker's stdout.
+        print(message, flush=True)
         self.last_heartbeat = now
 
     def process(self, frame: Frame) -> None:
