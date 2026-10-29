@@ -45,7 +45,7 @@
 5. Recorder เป็นงานรอง ถ้าดิสก์ช้าหรือเต็มให้หยุดอัด แต่ห้ามทำให้ pipeline หลักช้าลง
 
 ## Stack
-Python 3.11 · Ultralytics YOLO11s · TrackNetV3 (ONNX → TensorRT FP16) · OpenCV + GStreamer (SRT) · pyzmq · FastAPI + websockets · Ubuntu 22.04 + Docker (nvidia runtime) · OBS Browser Source
+Python 3.11 · YOLO11s-pose (Ultralytics, **AGPL-3.0**: ใช้ช่วง dev ได้ ถ้าทำเชิงพาณิชย์ต้องซื้อ license หรือสลับไปใช้ RTMPose ที่เป็น Apache-2.0 ดู `REFERENCES.md`) · TrackNetV3 (ONNX → TensorRT FP16) · OpenCV + GStreamer (SRT) · pyzmq · FastAPI + websockets · Ubuntu 22.04 + Docker (nvidia runtime) · OBS Browser Source
 
 ## Latency budget (เป้า p50 ≤150ms)
 

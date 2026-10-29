@@ -10,6 +10,7 @@
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | โครงสร้างระบบ หลักความเสถียร และ latency budget |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | รูปแบบข้อมูลระหว่างโมดูล |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | milestone S0–S4 และลำดับการ์ดงาน |
+| [docs/REFERENCES.md](docs/REFERENCES.md) | งานอ้างอิง สิ่งที่ควรและไม่ควรทำตาม และเรื่อง license |
 | [tasks/](tasks/) | การ์ดงาน T01–T11 |
 | [AGENTS.md](AGENTS.md) | กติกาสำหรับ AI agent ทุกค่าย |
 | [docs/CODEX.md](docs/CODEX.md) | วิธีใช้ Codex กับ repo นี้ |

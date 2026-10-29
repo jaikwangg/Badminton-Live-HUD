@@ -36,7 +36,7 @@
      "court_xy_m":[2.1,3.0],"speed_mps":2.4,"dist_m":23.6}
   ],
   "shuttle":{"status":"tracked|predicted|lost","img_xy":[900,300],
-             "court_xy_m":[7.0,2.2],"last_shot":{"by":0,"speed_kmh_est":150,"type":null}},
+             "landing_xy_m_est":null,"last_shot":{"by":0,"speed_kmh_est":150,"type":null}},
   "events": [{"ts":0,"kind":"shot|rally_start|rally_end|point_suggested","data":{}}],
   "health": {"fps":59.9,"latency_ms_p50":128,"latency_ms_p99":190,"dropped":0,
              "workers":{"players":"ok","shuttle":"ok|degraded|down","audio":"ok"}}
@@ -44,6 +44,13 @@
 ```
 - `events` ส่งเฉพาะ event ใหม่ตั้งแต่รอบที่แล้ว
 - ฟิลด์ที่ไม่รู้ค่าให้ส่ง `null` ห้ามละฟิลด์ทิ้ง
+- **ลูกไม่มีพิกัดบนคอร์ทระหว่างลอย** เพราะกล้องตัวเดียวไม่รู้ความสูงของลูก
+  - `landing_xy_m_est` มีค่าเฉพาะตอนจบ shot หรือ rally (จุดตกโดยประมาณ) ช่วงอื่นให้เป็น `null`
+  - court map ห้ามวาดลูกจาก `img_xy`
+- `players[].img_xy` = ตำแหน่งเท้า โดยใช้ค่าเฉลี่ยข้อเท้าจาก pose ถ้าไม่มีให้ใช้จุดกึ่งกลางขอบล่างของ bbox
+- `players[].side` ประเภทเดี่ยวให้คำนวณจากฝั่งของเส้นเน็ต**ทุกเฟรม** ห้ามยึดตาม track ID
+
+_Changelog: 2026-10-29 เปลี่ยน `shuttle.court_xy_m` เป็น `landing_xy_m_est` ตอนนี้ยังไม่มีโค้ดที่ใช้ฟิลด์นี้ จึงไม่ต้องเพิ่มเลขเวอร์ชัน (`v`)_
 
 ## Operator API (HTTP `:8080`)
 
