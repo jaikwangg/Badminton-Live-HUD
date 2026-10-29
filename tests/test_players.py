@@ -41,3 +41,10 @@ def test_worker_emits_feet_ids_and_contract_version() -> None:
     assert heartbeat["type"] == "heartbeat"
     assert heartbeat["worker"] == "players"
     assert heartbeat["proc_ms"] is not None
+
+
+def test_heartbeat_is_printed_for_supervisor(capsys) -> None:
+    worker = PlayersWorker(FakeDetector(), FakePublisher())
+    worker.process(7, 1234, 200, 100, bytes(200 * 100 * 3))
+    line = capsys.readouterr().out.strip()
+    assert json.loads(line)["worker"] == "players"

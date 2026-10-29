@@ -56,14 +56,15 @@ class PlayersWorker:
 
     def _heartbeat(self) -> None:
         now = time.monotonic()
-        self.publisher.send(
-            HeartbeatMessage(
-                worker="players",
-                ts=self._last_ts,
-                fps=self._processed / max(now - self._started, 1e-9),
-                proc_ms=self._last_proc_ms,
-            ).to_json()
-        )
+        message = HeartbeatMessage(
+            worker="players",
+            ts=self._last_ts,
+            fps=self._processed / max(now - self._started, 1e-9),
+            proc_ms=self._last_proc_ms,
+        ).to_json()
+        self.publisher.send(message)
+        # The supervisor watches heartbeat lines on this worker's stdout.
+        print(message, flush=True)
         self._last_heartbeat = now
 
     def _inside_roi(self, x: float, y: float, width: int, height: int) -> bool:
