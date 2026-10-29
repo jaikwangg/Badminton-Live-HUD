@@ -29,7 +29,8 @@ source.mov ─▶ calib.py ─▶ detect.py ─▶ color2.py ─▶ detect_far.p
 | 5 | `pipeline/identify.py data/dets2.json` | แบ่งฝั่งจากเส้นเน็ตทุกเฟรม แล้วแยกคนจากสี + ความต่อเนื่องของตำแหน่ง (Hungarian), smoothing, ความเร็ว, ระยะวิ่ง → `data/players.json` | ไม่กี่วินาที |
 | 6 | `pipeline/hits.py 5 7 1.6` | shot = เสียงกระทบลูก (2.5–9 kHz) ตรงกับการเหวี่ยงแขน, rally = ช่วงที่ฝั่งเราเคลื่อนที่ต่อเนื่องและมี shot ≥ 2 → `data/events.json` | ไม่กี่วินาที |
 | 7 | `pipeline/build.py` | ฝังข้อมูลลง `web/template.html` → `site/index.html` (หน้าเว็บเล่นวิดีโอ + HUD) | ทันที |
-| 8 | `pipeline/render_mp4.py out.mp4` | เรนเดอร์วิดีโอ 1920×1080 แบบจอถ่ายทอดสด: วิดีโอ + แผงสถิติ + court map + การ์ดผู้เล่น (ต้องมีฟอนต์จาก `tools/get_fonts.sh`) | ~6 นาที |
+| 8 | `pipeline/render_vertical.py out.mp4` | เรนเดอร์วิดีโอแนวตั้ง 1080×1920 (9:16) สำหรับมือถือ/TikTok: ชื่อโปรเจกต์, ช่องสถิติ, วิดีโอครอปเฉพาะคอร์ท, การ์ดผู้เล่น 4 คน, court map, timeline ของ rally (ตั้งชื่อหัวได้ด้วย `HUD_TITLE`) | ~5 นาที |
+| 8b | `pipeline/render_mp4.py out.mp4` | เรนเดอร์วิดีโอ 1920×1080 แบบจอถ่ายทอดสด: วิดีโอ + แผงสถิติ + court map + การ์ดผู้เล่น (ต้องมีฟอนต์จาก `tools/get_fonts.sh`) | ~6 นาที |
 | ตรวจ | `pipeline/verify.py 3,20,52` | วาดชื่อลงเฟรมจริงเพื่อตรวจด้วยตา → `out/verify.jpg` | — |
 
 `tools/` มีสคริปต์ที่ใช้ระหว่างสำรวจ: หาเส้นคอร์ทด้วย Hough (`lines.py`), ทดลองจับเสียง (`audio_hits.py`), และพล็อตเสียงเทียบกับการเหวี่ยงแขน (`plot_sig.py`)
@@ -45,7 +46,8 @@ ffmpeg -i data/source.mov -map 0:v:0 -map 0:a:1 -vf "scale=1280:720,fps=30" -c:v
 python3 pipeline/calib.py
 python3 pipeline/detect.py yolo11s-pose.pt 960 && python3 pipeline/color2.py && python3 pipeline/detect_far.py
 python3 pipeline/identify.py data/dets2.json && python3 pipeline/hits.py 5 7 1.6 && python3 pipeline/build.py
-bash tools/get_fonts.sh && python3 pipeline/render_mp4.py out/hud_1080p.mp4      # MP4 16:9
+bash tools/get_fonts.sh && python3 pipeline/render_vertical.py out/hud_vertical.mp4   # MP4 9:16
+python3 pipeline/render_mp4.py out/hud_1080p.mp4                                  # MP4 16:9
 HUD_PREVIEW=20.4 python3 pipeline/render_mp4.py out/preview.png                 # เฟรมเดียวสำหรับตรวจ layout
 # เปิด site/index.html (ต้องมี site/clip720.mp4 อยู่ข้างกัน build.py จะก๊อปจาก data/ ให้ถ้ามี)
 ```
