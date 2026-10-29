@@ -1,0 +1,17 @@
+# T04 — Fusion v0 + WS server + operator API
+
+**Goal:** รวมผลจาก worker ทั้งหมดเป็น GameState แล้วส่งออกผ่าน WebSocket
+**Owns:** `src/hud/fusion/homography.py`, `src/hud/fusion/state.py`, `src/hud/server/`, `tools/calibrate.py`
+**Depends:** T01
+
+## ทำ
+- `homography.py`: รับมุมคอร์ท 4 มุม (pixel) แล้วคำนวณ H เพื่อแปลง `foot_px` เป็น `court_xy_m`, บันทึกเป็น `config/court_calib.json`
+- `state.py`: subscribe ข้อมูลจาก worker แล้วสร้าง GameState ตาม CONTRACTS ทุกฟิลด์ต้องมีค่า (ถ้าไม่รู้ให้ใส่ `null`), คำนวณ `speed_mps` และ `dist_m` แบบ smoothing, ถ้า worker ไหนไม่ส่ง heartbeat ให้ตั้งสถานะเป็น `down`
+- `ws_server.py`: ส่ง GameState 30Hz ที่ `:8765`
+- `operator_api.py`: ทำ endpoint ตาม CONTRACTS (ขั้นนี้ทำแค่ calibrate, players, score, swap_ids)
+- `tools/calibrate.py`: หน้าคลิก 4 มุมบนภาพนิ่ง
+
+## Acceptance
+- [ ] ทดสอบ homography กับจุดที่รู้ตำแหน่งจริง ต้องคลาดเคลื่อน <1 cm
+- [ ] ถ้า kill players worker แล้ว WS ยังส่งข้อมูลต่อ และ `workers.players` เปลี่ยนเป็น `down`
+- [ ] GameState ทุก message ผ่านการตรวจ schema

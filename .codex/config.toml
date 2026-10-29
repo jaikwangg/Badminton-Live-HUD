@@ -1,0 +1,5 @@
+# Codex project config (ใช้เมื่อเปิด Codex CLI ใน repo นี้)
+# กติกาการทำงานอยู่ใน AGENTS.md ซึ่ง Codex อ่านอัตโนมัติ
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
