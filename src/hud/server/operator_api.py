@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from multiprocessing import resource_tracker
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +28,7 @@ def read_frame_jpeg(config: AppConfig) -> bytes | None:
         )
     except (FileNotFoundError, ValueError):
         return None
-    try:
-        if os.name != "nt":
-            # Attaching registers the segment with the resource tracker, which would unlink
-            # the capture's ring when this server exits; the creator owns its lifetime.
-            resource_tracker.unregister(ring.shm._name, "shared_memory")  # type: ignore[attr-defined]
+    try:  # create=False attaches untracked, so closing never unlinks the capture's ring
         frame = ring.read_latest()
     except (ValueError, IndexError):  # struct.error is a ValueError: ring smaller than config
         return None
