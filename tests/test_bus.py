@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
 import time
 import uuid
 
+import pytest
+
+from hud.bus import shm_ring
 from hud.bus.messages import (
     HeartbeatMessage,
     HitMessage,
@@ -97,3 +103,43 @@ def test_ring_readers_never_observe_torn_frames() -> None:
         writer.close()
         writer.unlink()
     assert not failures
+
+
+def test_reader_attach_untracks_segment(monkeypatch: pytest.MonkeyPatch) -> None:
+    name = f"hud_test_{uuid.uuid4().hex}"
+    writer = SharedFrameRing(name, 4, 2)
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(shm_ring, "_HAS_TRACK_ARG", False)
+    monkeypatch.setattr(shm_ring, "_POSIX", True)
+    monkeypatch.setattr(
+        shm_ring.resource_tracker, "unregister", lambda n, rtype: calls.append((n, rtype))
+    )
+    reader = SharedFrameRing(name, 4, 2, create=False)
+    try:
+        assert calls == [(reader.shm._name, "shared_memory")]
+    finally:
+        reader.close()
+        writer.close()
+        writer.unlink()
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="Windows has no unlink; a segment lives while any handle is open"
+)
+def test_reader_process_exit_keeps_segment() -> None:
+    name = f"hud_test_{uuid.uuid4().hex}"
+    writer = SharedFrameRing(name, 4, 2)
+    try:
+        code = (
+            "from hud.bus.shm_ring import SharedFrameRing; "
+            f"SharedFrameRing({name!r}, 4, 2, create=False).close()"
+        )
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+        # capture_output waits for pipe EOF, i.e. until the child's resource_tracker exits too.
+        subprocess.run(
+            [sys.executable, "-c", code], env=env, check=True, timeout=30, capture_output=True
+        )
+        SharedFrameRing(name, 4, 2, create=False).close()  # raises if the reader unlinked it
+    finally:
+        writer.close()
+        writer.unlink()
