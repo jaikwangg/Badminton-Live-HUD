@@ -108,8 +108,15 @@ class FusionState:
         self._app_window_frames = int(identity.get("app_window_frames", 90))
         # Metres of position cost per unit of L1 appearance distance.
         self._app_weight_m = float(identity.get("app_weight_m", 2.0))
-        # Larger than any court distance plus appearance term, so the net line decides side.
+        # Larger than any court distance plus appearance term: marks a forbidden pairing.
         self._side_mismatch_cost = float(identity.get("side_mismatch_cost", 100.0))
+        # Feet within this many metres of the net may still belong to the other team's side
+        # (a net shot, a camera-angle error); beyond it a detection only takes that side's team.
+        self._net_slack_m = float(identity.get("net_slack_m", 1.0))
+        # Long-term appearance per slot: median of the first seconds of tracking, then a slow
+        # per-frame EMA, so a track that comes back is matched by looks, not only position.
+        self._gallery_ns = int(float(identity.get("gallery_s", 5.0)) * 1_000_000_000)
+        self._gallery_refresh = float(identity.get("gallery_refresh", 0.002))
         # ponytail: T01 should add `fusion.players: {median_frames: 5, deadband_m: 0.15}` to
         # config/default.yaml; until then these defaults apply. Picked by replaying a 180 s
         # doubles WS log, not tuned against ground truth.
@@ -149,6 +156,11 @@ class FusionState:
         # Per slot: (recent court xy window, last counted position, its ts) for dist/speed.
         self._motion: dict[int, tuple[deque[list[float]], list[float], int]] = {}
         self._app_history: dict[int, deque[list[float]]] = {}
+        self._gallery: dict[int, list[float]] = {}
+        # Per slot while the gallery fills: (first ts, samples); bounded by gallery_s.
+        self._gallery_seed: dict[int, tuple[int, list[list[float]]]] = {}
+        # Side each team plays from; changes only when the operator re-posts players.
+        self._team_side = {0: 0, 1: 1}
         self._score: list[int | None] = [None, None]
         self._games: list[int | None] = [None, None]
         self._server: int | None = None
@@ -230,7 +242,9 @@ class FusionState:
                     for detection, court_xy in positioned
                 ]
                 for row, col in _min_cost_pairs(costs):
-                    assigned[positioned[row][0].track_id] = free[col]
+                    # A forbidden pair means no slot of that side's team was free: drop it.
+                    if costs[row][col] < self._side_mismatch_cost:
+                        assigned[positioned[row][0].track_id] = free[col]
                 for detection, court_xy in detections:
                     free = [s for s in range(self._player_count) if s not in assigned.values()]
                     if court_xy is None and detection.track_id not in assigned and free:
@@ -239,7 +253,6 @@ class FusionState:
                 for detection, court_xy in detections:
                     if detection.track_id not in assigned:
                         continue
-                    side = None if court_xy is None else int(court_xy[0] > _NET_X_M)
                     player_id = assigned[detection.track_id]
                     apps = self._app_history.setdefault(
                         player_id, deque(maxlen=self._app_window_frames)
@@ -249,6 +262,7 @@ class FusionState:
                         if apps and len(apps[0]) != len(detection.app):
                             apps.clear()
                         apps.append(detection.app)
+                        self._update_gallery(player_id, detection.app, decoded.ts)
                     previous_player = self._players.get(player_id, {})
                     speed: float | None = None
                     distance: float | None = previous_player.get("dist_m")
@@ -286,7 +300,9 @@ class FusionState:
                         "name": metadata.get("name"),
                         "color": metadata.get("color"),
                         "team": metadata.get("team", player_id % 2),
-                        "side": self._slot_side(player_id) if side is None else side,
+                        # Feet beyond the net slack only reach their team's slots, so the
+                        # team's side is the net-line side with the slack as hysteresis.
+                        "side": self._slot_side(player_id),
                         "tracked": True,
                         "img_xy": detection.foot_px,
                         "bbox": detection.bbox,
@@ -363,13 +379,22 @@ class FusionState:
             team_counts[team] += 1
         if team_counts != [expected // 2] * 2:
             raise ValueError("Each team must have the same number of players")
+        team_side = {player.get("team", player["side"]): player["side"] for player in players}
+        if any(
+            team_side[player.get("team", player["side"])] != player["side"] for player in players
+        ):
+            raise ValueError("Teammates must start on the same side")
         with self._lock:
             new_mode = mode
+            # Re-posting players is the end change: teams take their new sides here.
+            self._team_side = team_side
             if new_mode != self._mode:
                 self._players.clear()
                 self._player_history.clear()
                 self._motion.clear()
                 self._app_history.clear()
+                self._gallery.clear()
+                self._gallery_seed.clear()
                 self._track_to_id.clear()
             self._mode = new_mode
             self._fsm.mode = new_mode
@@ -383,6 +408,7 @@ class FusionState:
                     name=metadata.get("name"),
                     color=metadata.get("color"),
                     team=metadata.get("team", player_id % 2),
+                    side=self._slot_side(player_id),
                 )
 
     def add_score(self, team: int, delta: int) -> None:
@@ -444,12 +470,13 @@ class FusionState:
                 self._player_history.get(second),
                 self._player_history.get(first),
             )
-            for slot, value in (
-                (first, self._motion.pop(second, None)),
-                (second, self._motion.pop(first, None)),
-            ):
-                if value is not None:
-                    self._motion[slot] = value
+            for store in (self._motion, self._gallery, self._gallery_seed):
+                for slot, value in (
+                    (first, store.pop(second, None)),
+                    (second, store.pop(first, None)),
+                ):
+                    if value is not None:
+                        store[slot] = value
             # Appearance follows the track too, so the next match keeps the operator's swap.
             self._app_history[first], self._app_history[second] = (
                 self._app_history.get(second, deque(maxlen=self._app_window_frames)),
@@ -459,10 +486,21 @@ class FusionState:
                 self._players.get(second),
                 self._players.get(first),
             )
+            # A cross-team swap says the teams are on the other ends: move the team->side
+            # map to where the swapped track stands, unless it is within the net slack.
+            first_team, second_team = self._slot_team(first), self._slot_team(second)
+            history = self._player_history.get(first)
+            if (
+                first_team != second_team
+                and history is not None
+                and abs(history[1] - _NET_X_M) > self._net_slack_m
+            ):
+                side = int(history[1] > _NET_X_M)
+                self._team_side = {first_team: side, second_team: 1 - side}
             # Live data follows the track; name, colour and team stay with the id.
-            for player_id in (first, second):
-                if self._players[player_id] is None:
-                    self._players.pop(player_id)
+            for player_id in range(self._player_count):
+                if self._players.get(player_id) is None:
+                    self._players.pop(player_id, None)
                     continue
                 metadata = self._player_config.get(player_id, {})
                 self._players[player_id].update(
@@ -470,6 +508,7 @@ class FusionState:
                     name=metadata.get("name"),
                     color=metadata.get("color"),
                     team=metadata.get("team", player_id % 2),
+                    side=self._slot_side(player_id),
                 )
 
     def snapshot(self, *, drain_events: bool = True) -> dict[str, Any]:
@@ -549,7 +588,7 @@ class FusionState:
             "name": metadata.get("name"),
             "color": metadata.get("color"),
             "team": metadata.get("team", player_id % 2),
-            "side": metadata.get("side", player_id % 2),
+            "side": self._slot_side(player_id),
             "tracked": False,
             "img_xy": None,
             "bbox": None,
@@ -562,12 +601,28 @@ class FusionState:
     def _player_count(self) -> int:
         return 2 if self._mode == "singles" else 4
 
+    def _slot_team(self, slot: int) -> int:
+        return self._player_config.get(slot, {}).get("team", slot % 2)
+
     def _slot_side(self, slot: int) -> int:
-        # Last side seen from the net line, else the operator's starting side.
-        player = self._players.get(slot)
-        if player is not None:
-            return player["side"]
-        return self._player_config.get(slot, {}).get("side", slot % 2)
+        # The team's side, not the last net-line side: one player's feet over the net must
+        # not move the slot to the other team's half.
+        return self._team_side[self._slot_team(slot)]
+
+    def _update_gallery(self, slot: int, app: list[float], ts: int) -> None:
+        gallery = self._gallery.get(slot)
+        if gallery is not None and len(gallery) == len(app):
+            rate = self._gallery_refresh
+            self._gallery[slot] = [g + rate * (a - g) for g, a in zip(gallery, app, strict=True)]
+            return
+        self._gallery.pop(slot, None)
+        seed = self._gallery_seed.get(slot)
+        if seed is None or len(seed[1][0]) != len(app):
+            seed = self._gallery_seed[slot] = (ts, [])
+        seed[1].append(app)
+        if ts - seed[0] >= self._gallery_ns:
+            self._gallery[slot] = [statistics.median(v) for v in zip(*seed[1], strict=True)]
+            del self._gallery_seed[slot]
 
     def _app_median(self, slot: int) -> list[float] | None:
         # Per-frame appearance is too noisy (LESSONS 4); past frames only, as this is live.
@@ -583,14 +638,22 @@ class FusionState:
         app: list[float] | None,
         median: list[float] | None,
     ) -> float:
-        side = int(court_xy[0] > _NET_X_M)
-        cost = 0.0 if self._slot_side(slot) == side else self._side_mismatch_cost
+        past_net_m = court_xy[0] - _NET_X_M
+        cost = 0.0
+        if (past_net_m > 0) != (self._slot_side(slot) == 1):
+            # Beyond the slack only the team on that side may take it; inside, the depth
+            # past the net is the price, so a fresh track still prefers its net-line side.
+            slack = abs(past_net_m) > self._net_slack_m
+            cost = self._side_mismatch_cost if slack else 2 * abs(past_net_m)
         previous = self._player_history.get(slot)
         if previous is not None:
             cost += math.dist(court_xy, previous[1:])
         # Unknown appearance on either end falls back to position only.
-        if app is not None and median is not None and len(app) == len(median):
-            cost += self._app_weight_m * sum(abs(a - b) for a, b in zip(app, median, strict=True))
+        if app is not None:
+            refs = [r for r in (median, self._gallery.get(slot)) if r and len(r) == len(app)]
+            if refs:
+                distance = sum(sum(abs(a - b) for a, b in zip(app, r, strict=True)) for r in refs)
+                cost += self._app_weight_m * distance / len(refs)
         return cost
 
     def _court_point(self, point_px: list[float]) -> list[float] | None:
