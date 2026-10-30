@@ -10,7 +10,7 @@ import numpy as np
 
 from hud.bus.messages import HeartbeatMessage, PlayersMessage
 from hud.bus.shm_ring import SharedFrameRing
-from hud.config import AppConfig, load_config
+from hud.config import AppConfig, endpoint, load_config
 from hud.models.detector import Det, Detector, create_detector
 from hud.models.detector_app import chest_appearance
 
@@ -132,7 +132,7 @@ class PlayersWorker:
 def run(config: AppConfig) -> None:
     model_config = config.models["players"]
     detector = create_detector(model_config)
-    publisher = ZmqPublisher("ipc:///tmp/hud_players")
+    publisher = ZmqPublisher(endpoint(config, "players"))
     bus = SharedFrameRing(
         config.bus.name,
         config.source.width,

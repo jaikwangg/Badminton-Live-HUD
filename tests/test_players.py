@@ -8,8 +8,10 @@ import pytest
 import yaml
 
 from hud.bus.messages import PlayersMessage
+from hud.config import load_config
 from hud.models.detector import Det
 from hud.models.detector_app import chest_appearance
+from hud.workers import players as players_worker
 from hud.workers.players import PlayersWorker
 
 
@@ -149,3 +151,19 @@ def test_four_players_each_get_their_own_app() -> None:
     assert [player.track_id for player in players] == [0, 1, 2, 3]
     assert all(app is not None and len(app) == APP_CFG["length"] for app in apps)
     assert len({tuple(app) for app in apps}) == 4
+
+
+def test_run_binds_the_configured_bus_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config()
+    config.bus.endpoints["players"] = "tcp://127.0.0.1:59999"
+    bound: list[str] = []
+
+    def fake_publisher(address: str) -> None:
+        bound.append(address)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(players_worker, "create_detector", lambda _cfg: None)
+    monkeypatch.setattr(players_worker, "ZmqPublisher", fake_publisher)
+    with pytest.raises(RuntimeError, match="stop"):
+        players_worker.run(config)
+    assert bound == ["tcp://127.0.0.1:59999"]
