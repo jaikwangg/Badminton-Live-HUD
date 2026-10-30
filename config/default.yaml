@@ -11,6 +11,15 @@ models:
     path: models/players.onnx
     input_size: 640
     confidence: 0.35
+    app:  # players[].app appearance vector (CONTRACTS.md)
+      method: chest_color  # chest_color now; a re-ID model later
+      length: 16  # fixed vector length: (length - 2) hue bins + dark and light fractions
+      chest_box: [0.28, 0.18, 0.72, 0.42]  # x1, y1, x2, y2 as fractions of the person bbox
+      # HSV low/high (OpenCV ranges) of the court floor, removed before colour stats.
+      # Prototype value only; needs calibration on the real court.
+      floor_hsv: [[100, 120, 90], [125, 255, 255]]
+      achromatic_s_max: 60  # pixels at or below this saturation count as dark or light, not hue
+      dark_v_max: 75  # achromatic pixels at or below this value count as dark
   shuttle:
     backend: onnxruntime
     path: models/shuttle.onnx

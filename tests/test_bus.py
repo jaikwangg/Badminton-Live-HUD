@@ -29,7 +29,9 @@ def test_all_worker_messages_round_trip() -> None:
         PlayersMessage(
             frame_id=3,
             ts=8,
-            players=[{"track_id": 1, "bbox": [1, 2, 3, 4], "foot_px": [2, 4], "conf": 0.9}],
+            players=[
+                {"track_id": 1, "bbox": [1, 2, 3, 4], "foot_px": [2, 4], "conf": 0.9, "app": None}
+            ],
         ),
         ShuttleMessage(frame_id=3, ts=8, visible=True, px=[4, 5], conf=0.8),
         HitMessage(ts=8, strength=0.72),
@@ -38,6 +40,22 @@ def test_all_worker_messages_round_trip() -> None:
     for message in messages:
         decoded = message_from_json(message.to_json())
         assert decoded.to_json() == message.to_json()
+
+
+def test_players_app_round_trips_and_defaults_to_null() -> None:
+    with_app = PlayersMessage(
+        players=[
+            {"track_id": 1, "bbox": [1, 2, 3, 4], "foot_px": [2, 4], "conf": 0.9, "app": [0.5, 0.5]}
+        ]
+    )
+    assert PlayersMessage.from_json(with_app.to_json()).players[0].app == [0.5, 0.5]
+    old = (
+        '{"v":1,"type":"players","frame_id":1,"ts":2,'
+        '"players":[{"track_id":1,"bbox":[1,2,3,4],"foot_px":[2,4],"conf":0.9}]}'
+    )
+    decoded = PlayersMessage.from_json(old)
+    assert decoded.players[0].app is None
+    assert '"app":null' in decoded.to_json()
 
 
 def test_ring_readers_never_observe_torn_frames() -> None:
