@@ -536,7 +536,11 @@ Message = tuple[str, int, Any]  # (kind, ts_ms, payload)
 
 
 def replay(
-    messages: list[Message], *, audio_ok: bool = False, kf: ShuttleKalmanFilter | None = None
+    messages: list[Message],
+    *,
+    audio_ok: bool = False,
+    kf: ShuttleKalmanFilter | None = None,
+    homography: list[list[float]] | None = None,
 ) -> list[dict[str, Any]]:
     """Feed shuttle/hit/players messages the way fusion does and return the emitted events.
 
@@ -545,7 +549,7 @@ def replay(
     """
     kf = kf or ShuttleKalmanFilter()
     detector = ShotDetector()
-    fsm = RallyFSM()
+    fsm = RallyFSM(homography=homography)
     players: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
     for kind, ts_ms, payload in messages:
@@ -558,7 +562,7 @@ def replay(
                 fsm.on_shot(shot)
         else:
             res = kf.update(payload is not None, payload, ts)
-            fsm.on_shuttle_update(res.status, kf.last_seen_px, ts)
+            fsm.on_shuttle_update(res.status, kf.last_seen_px, ts, kf.rest_px)
             if res.direction_changed:
                 shot = detector.register_direction_change(
                     ts, px=res.px, players=players, audio_degraded=not audio_ok
@@ -634,3 +638,91 @@ def test_replay_without_direction_memory_misses_the_hidden_hit() -> None:
     )
     first_rally_end = next(e for e in events if e["kind"] == "rally_end")
     assert first_rally_end["data"]["shots"] == 1
+
+
+# Image px -> court m for the rest tests: (400, 516) -> (8.0, 5.16), inside the singles court.
+_SCALE_H = [[0.02, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 1.0]]
+# One shot, then the shuttle falls and lies at (400, 516) with +-5 px detector jitter; the
+# jitter alone (56 px/s, reversing every message) would read as direction changes in flight.
+_REST_SHUTTLE = [
+    *((ms, px) for ms, px in _REPLAY_SHUTTLE if ms <= 1750),
+    (2000, [400.0, 516.0]),
+    *((ms, [405.0, 521.0] if ms % 500 else [395.0, 511.0]) for ms in range(2250, 8000, 250)),
+]
+
+
+def _rest_fixture(shuttle: list[tuple[int, list[float] | None]]) -> list[Message]:
+    return [("players", 0, _REPLAY_PLAYERS)] + [("shuttle", ms, px) for ms, px in shuttle]
+
+
+def test_replay_resting_shuttle_ends_rally_and_marks_landing() -> None:
+    events = replay(_rest_fixture(_REST_SHUTTLE), homography=_SCALE_H)
+    assert [e["kind"] for e in events] == ["rally_start", "shot", "rally_end", "point_suggested"]
+    # Rest detected at 2500 ms; the rally runs from the 1250 ms shot to the 2250 ms sighting.
+    assert events[2]["data"] == {"n": 1, "t_ms": 1000, "shots": 1}
+    assert events[3]["data"]["landing_xy_m_est"] == [8.0, 5.16]
+
+
+def test_replay_without_rest_detection_never_ends_rally() -> None:
+    events = replay(
+        _rest_fixture(_REST_SHUTTLE), kf=ShuttleKalmanFilter(rest_ms=1e9), homography=_SCALE_H
+    )
+    assert "rally_end" not in [e["kind"] for e in events]
+
+
+@pytest.mark.parametrize(("rest_ms", "expected"), [(400.0, 1), (1e9, 22)])
+def test_floor_jitter_gives_no_direction_changes_once_resting(
+    rest_ms: float, expected: int
+) -> None:
+    kf = ShuttleKalmanFilter(rest_ms=rest_ms)
+    changes = sum(
+        kf.update(px is not None, px, ms * 1_000_000).direction_changed for ms, px in _REST_SHUTTLE
+    )
+    assert changes == expected  # 1 = the real hit at 1250 ms
+
+
+def test_replay_rest_after_rally_end_replaces_landing_suggestion() -> None:
+    # Last in-flight sighting at 3000 ms (far court), shuttle unseen until the rally ends
+    # at 5000 ms, then seen lying at (400, 516) from 5250 ms.
+    shuttle = [
+        *((ms, px) for ms, px in _REPLAY_SHUTTLE if ms <= 3000),
+        *((ms, None) for ms in range(3250, 5250, 250)),
+        *((ms, [400.0, 516.0]) for ms in range(5250, 7000, 250)),
+    ]
+    events = replay(_rest_fixture(shuttle), homography=_SCALE_H)
+    kinds = [e["kind"] for e in events]
+    assert kinds == [
+        "rally_start",
+        "shot",
+        "shot",
+        "rally_end",
+        "point_suggested",
+        "point_suggested",
+    ]
+    first, second = events[4], events[5]
+    assert first["data"]["landing_xy_m_est"] == [8.0, 2.5]
+    assert second["ts"] == first["ts"]  # same key: replaces the pending suggestion
+    assert second["data"]["landing_xy_m_est"] == [8.0, 5.16]
+
+
+@pytest.mark.parametrize("rate_hz", [4, 60])
+def test_kalman_slow_flying_shuttle_is_not_resting(rate_hz: int) -> None:
+    kf = ShuttleKalmanFilter()
+    step_ms = 1000 // rate_hz
+    for i in range(3 * rate_hz):
+        t_ms = i * step_ms
+        res = kf.update(True, [100.0 + 0.04 * t_ms, 300.0], t_ms * 1_000_000)  # 40 px/s
+        assert res.status == "tracked"
+        assert kf.rest_px is None
+
+
+def test_kalman_stationary_shuttle_becomes_lost_after_rest_ms() -> None:
+    kf = ShuttleKalmanFilter(rest_radius_px=8.0, rest_ms=400.0)
+    ms = 1_000_000
+    statuses = [kf.update(True, [450.0, 516.0], t * 100 * ms).status for t in range(6)]
+    assert statuses == ["tracked"] * 4 + ["lost"] * 2
+    assert kf.rest_px == [450.0, 516.0]
+    assert kf.update(False, None, 700 * ms).status == "lost"
+    # Picked up and served: a detection outside the radius is in flight again.
+    assert kf.update(True, [450.0, 480.0], 800 * ms).status == "tracked"
+    assert kf.rest_px is None
