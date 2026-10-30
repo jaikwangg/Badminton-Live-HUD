@@ -21,6 +21,10 @@ class Detector(Protocol):
         """Run person detection and ByteTrack, returning image-space boxes."""
 
 
+# ponytail: fixed constant, not config; move to models.players (T01 owns config) to tune.
+TILE_EDGE_PX = 2.0  # a tile box this close to an edge inside the frame is a cut-off person
+
+
 def _iou(a: list[float], b: list[float]) -> float:
     inter_w = min(a[2], b[2]) - max(a[0], b[0])
     inter_h = min(a[3], b[3]) - max(a[1], b[1])
@@ -120,25 +124,35 @@ class YoloByteTrackDetector:
             x0, y0 = int(tile[0] * width), int(tile[1] * height)
             x1, y1 = int(tile[2] * width), int(tile[3] * height)
             conf = float(tile[4]) if len(tile) > 4 else self.confidence
-            crops.append((img[y0:y1, x0:x1], x0, y0, conf))
+            # Edges inside the frame: a box touching one is a person cut by the tile.
+            inner = (x0 > 0, y0 > 0, x1 < width, y1 < height)
+            crops.append((img[y0:y1, x0:x1], x0, y0, conf, inner))
         # Ultralytics runs the list in chunks of a static engine's batch size.
         results = self._model.predict(
-            [crop for crop, *_ in crops],
+            [crop[0] for crop in crops],
             imgsz=self.input_size,
-            conf=min(conf for *_, conf in crops),
+            conf=min(crop[3] for crop in crops),
             classes=[0],
             verbose=False,
         )
         detections: list[Det] = []
-        for (_, x0, y0, conf), result in zip(crops, results, strict=True):
+        for (crop, x0, y0, conf, inner), result in zip(crops, results, strict=True):
             boxes = result.boxes
             if boxes is None:
                 continue
+            crop_h, crop_w = crop.shape[:2]
             keypoints = getattr(result, "keypoints", None)
             kpts = keypoints.data.cpu().tolist() if keypoints is not None else None
             coords = boxes.xyxy.cpu().tolist()
             for i, (bbox, score) in enumerate(zip(coords, boxes.conf.cpu().tolist(), strict=True)):
-                if score < conf:
+                cut = (
+                    bbox[0] <= TILE_EDGE_PX,
+                    bbox[1] <= TILE_EDGE_PX,
+                    bbox[2] >= crop_w - TILE_EDGE_PX,
+                    bbox[3] >= crop_h - TILE_EDGE_PX,
+                )
+                # Overlapping tiles (or a full-frame tile) see a cut person whole.
+                if score < conf or any(c and e for c, e in zip(cut, inner, strict=True)):
                     continue
                 detections.append(
                     Det(

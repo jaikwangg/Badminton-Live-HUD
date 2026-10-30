@@ -265,8 +265,9 @@ def test_tiles_run_in_one_batch_map_back_and_merge(monkeypatch: pytest.MonkeyPat
     detector._model.answers = {
         # Full frame: near player, and the far player below the full-frame conf.
         (100, 200): [[10, 60, 30, 95, 0.8], [90, 55, 100, 75, 0.3]],
-        # Left tile (x0 0, y0 50): near player again and the far player at 0.25.
-        (50, 120): [[10, 10, 30, 45, 0.6], [90, 5, 100, 25, 0.25]],
+        # Left tile (x0 0, y0 50): near player again, the far player at 0.25, and a
+        # person cut by the tile's inner right edge (dropped; the full frame sees them).
+        (50, 120): [[10, 10, 30, 45, 0.6], [90, 5, 100, 25, 0.25], [105, 0, 120, 40, 0.9]],
         # Right tile (x0 70, y0 50): the far player again, shifted a pixel.
         (50, 130): [[21, 5, 31, 25, 0.22]],
     }
