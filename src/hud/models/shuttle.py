@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,6 +29,15 @@ class ResizedFrame:
     source_width: int
     source_height: int
     image_rgb: np.ndarray
+    # Normalised float32 CHW copy, built once so each inference only copies it.
+    chw: np.ndarray = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "chw", _normalised_chw(self.image_rgb))
+
+
+def _normalised_chw(image_rgb: np.ndarray) -> np.ndarray:
+    return image_rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
 
 
 class Session(Protocol):
@@ -181,6 +190,9 @@ class TrackNetV3Tracker:
             raise ValueError("morph_kernel_size must be a positive odd number")
         if min_contour_area < 0 or max_contour_area < min_contour_area:
             raise ValueError("Contour area limits are invalid")
+        # Reused by every inference; the worker runs one inference at a time on one thread.
+        self._input = np.empty((1, input_channels, self.height, self.width), dtype=np.float32)
+        self._input_background: np.ndarray | None = None
 
     @staticmethod
     def _static_dimension(value: int | str | None, label: str) -> int:
@@ -231,12 +243,16 @@ class TrackNetV3Tracker:
             raise ValueError("Background must be resized RGB uint8 at the model input resolution")
 
         # Official dataset.py prepends the RGB median image, then appends RGB frames in time order.
-        tensors = [background.transpose(2, 0, 1)]
-        for frame in frames:
-            if frame.image_rgb.shape != (self.height, self.width, 3):
+        # The background only changes every few seconds (a new array each time), so it is
+        # rewritten only when a different array arrives; the reference keeps its id unique.
+        if background is not self._input_background:
+            self._input[0, :3] = _normalised_chw(background)
+            self._input_background = background
+        for index, frame in enumerate(frames, start=1):
+            if frame.chw.shape != (3, self.height, self.width):
                 raise ValueError("Cached RGB frame has the wrong model input resolution")
-            tensors.append(frame.image_rgb.transpose(2, 0, 1))
-        return np.concatenate(tensors, axis=0)[None, ...].astype(np.float32) / 255.0
+            self._input[0, 3 * index : 3 * index + 3] = frame.chw
+        return self._input
 
     def infer(
         self, frames: Sequence[ResizedFrame], background: np.ndarray
