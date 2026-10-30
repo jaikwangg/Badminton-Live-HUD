@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>Badminton Live HUD</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&amp;family=IBM+Plex+Sans+Thai:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#3fd0f0}a:hover{color:#8fe6f8}
+.num{font-family:'Barlow Condensed',sans-serif;font-variant-numeric:tabular-nums}
+.pn{background:rgba(8,15,26,.86);border:1px solid rgba(130,170,215,.28);border-radius:6px;box-sizing:border-box}
+.lb{font-family:'Barlow Condensed',sans-serif;font-size:16px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#a3b6cb}
+.cr{position:absolute;width:22%;height:12%;border-color:var(--c);border-style:solid;border-width:0}
+.cr.a{left:0;top:0;border-top-width:3px;border-left-width:3px}
+.cr.b{right:0;top:0;border-top-width:3px;border-right-width:3px}
+.cr.c{left:0;bottom:0;border-bottom-width:3px;border-left-width:3px}
+.cr.d{right:0;bottom:0;border-bottom-width:3px;border-right-width:3px}
+.fg{position:absolute;background:#2a3c54;border:1px solid #3b5272;box-sizing:border-box}
+.fg.h{left:37%;top:0;width:26%;height:13%;border-radius:50%}
+.fg.t{left:24%;top:14%;width:52%;height:42%;border-radius:22px 22px 8px 8px}
+.fg.l{left:30%;top:55%;width:40%;height:45%;border-radius:6px}
+.ln{position:absolute;background:rgba(232,240,248,.55)}
+</style>
+</helmet>
+<div style="position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0a111b; font-family: 'IBM Plex Sans Thai', sans-serif; color: #eef3f8">
+
+<div style="position: absolute; left: 0; top: 0; width: 1920px; height: 312px; background: #18222f"></div>
+<div style="position: absolute; left: 0; top: 250px; width: 1920px; height: 62px; background: #1f2b3a"></div>
+
+<svg width="1920" height="1080" viewBox="0 0 1920 1080" style="position: absolute; left: 0; top: 0" aria-hidden="true">
+<path d="{{court.floor}}" fill="#143a63"></path>
+<path d="{{court.area}}" fill="#1b5088"></path>
+<path d="{{court.lines}}" stroke="#e8f0f8" stroke-opacity="0.85" stroke-width="3" fill="none"></path>
+<path d="{{court.mesh}}" fill="#ffffff" fill-opacity="0.07" stroke="#ffffff" stroke-opacity="0.18"></path>
+<path d="{{court.net}}" stroke="#f4f7fb" stroke-width="4" fill="none"></path>
+<path d="{{court.posts}}" stroke="#d64545" stroke-width="7" fill="none"></path>
+</svg>
+
+<sc-for list="{{players}}" as="p" hint-placeholder-count="4">
+<div style="display: contents">
+<div style="{{p.ringStyle}}"></div>
+<div style="{{p.boxStyle}}">
+<div class="fg h"></div>
+<div class="fg t"></div>
+<div class="fg l"></div>
+<sc-if value="{{showBoxes}}" hint-placeholder-val="{{ true }}">
+<div class="cr a"></div>
+<div class="cr b"></div>
+<div class="cr c"></div>
+<div class="cr d"></div>
+</sc-if>
+</div>
+<div class="pn" style="{{p.tagStyle}}">
+<span style="font-size: 20px; font-weight: 600">{{p.name}}</span>
+<span class="num" style="font-size: 20px; color: #c3d2e1">{{p.hr}} bpm</span>
+</div>
+</div>
+</sc-for>
+
+<sc-if value="{{shuttle.show}}" hint-placeholder-val="{{ true }}">
+<div style="{{shuttle.retStyle}}">
+<div class="cr a"></div>
+<div class="cr b"></div>
+<div class="cr c"></div>
+<div class="cr d"></div>
+<div style="position: absolute; left: 24px; top: 24px; width: 12px; height: 12px; border-radius: 50%; background: #ffd75a; box-shadow: 0 0 12px #ffd75a"></div>
+</div>
+<div class="pn" style="{{shuttle.labelStyle}}">
+<span class="lb" style="color: #ffd75a">Lock on · {{lockName}}</span>
+<span class="num" style="font-size: 32px; font-weight: 700; line-height: 1">{{speed}} <span style="font-size: 18px; color: #a3b6cb">km/h est.</span></span>
+<span style="font-size: 15px; color: #a3b6cb">{{lockNote}}</span>
+</div>
+</sc-if>
+
+<div class="pn" style="position: absolute; left: 32px; top: 32px; width: 440px; padding: 14px 18px; display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; align-items: center; gap: 10px">
+<span class="lb" style="background: #e5384b; color: #ffffff; padding: 2px 10px; border-radius: 3px">Live</span>
+<span style="font-size: 16px; color: #a3b6cb">แรลลี่ที่ {{rallyNo}}</span>
+<span style="margin-left: auto; font-size: 13px; color: #a3b6cb; border: 1px solid rgba(130,170,215,.35); border-radius: 3px; padding: 1px 8px">ข้อมูลจำลอง</span>
+</div>
+<div style="display: grid; grid-template-columns: 1fr 44px 64px; align-items: center; gap: 10px">
+<div style="display: flex; align-items: center; gap: 10px">
+<span style="width: 10px; height: 10px; border-radius: 50%; background: #3fd0f0"></span><span style="width: 10px; height: 10px; border-radius: 50%; background: #4be3a0"></span>
+<span style="font-size: 22px; font-weight: 600">ทีมเรา</span>
+<sc-if value="{{serveA}}" hint-placeholder-val="{{ true }}"><span class="lb" style="color: #ffd75a; font-size: 13px">Serve</span></sc-if>
+</div>
+<span class="num" style="font-size: 26px; color: #a3b6cb; text-align: center">{{gamesA}}</span>
+<span class="num" style="font-size: 40px; font-weight: 700; text-align: right; line-height: 1">{{scoreA}}</span>
+<div style="display: flex; align-items: center; gap: 10px">
+<span style="width: 10px; height: 10px; border-radius: 50%; background: #b892ff"></span><span style="width: 10px; height: 10px; border-radius: 50%; background: #ffc247"></span>
+<span style="font-size: 22px; font-weight: 600">คู่แข่ง</span>
+<sc-if value="{{serveB}}" hint-placeholder-val="{{ false }}"><span class="lb" style="color: #ffd75a; font-size: 13px">Serve</span></sc-if>
+</div>
+<span class="num" style="font-size: 26px; color: #a3b6cb; text-align: center">{{gamesB}}</span>
+<span class="num" style="font-size: 40px; font-weight: 700; text-align: right; line-height: 1">{{scoreB}}</span>
+</div>
+</div>
+
+<div style="position: absolute; left: 504px; top: 32px; width: 912px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px">
+<div class="pn" style="padding: 12px 20px; display: flex; flex-direction: column; gap: 2px">
+<span class="lb">Rally time</span>
+<span class="num" style="font-size: 60px; font-weight: 600; line-height: 1">{{rallyTime}}</span>
+</div>
+<div class="pn" style="padding: 12px 20px; display: flex; flex-direction: column; gap: 2px">
+<span class="lb">Rally count</span>
+<span class="num" style="font-size: 60px; font-weight: 600; line-height: 1">{{shots}} <span style="font-size: 22px; color: #a3b6cb">shot</span></span>
+</div>
+<div class="pn" style="padding: 12px 20px; display: flex; flex-direction: column; gap: 2px">
+<div style="display: flex; align-items: center; gap: 8px"><span class="lb">Shot speed</span><span class="lb" style="font-size: 12px; color: #ffd75a; border: 1px solid #ffd75a; border-radius: 3px; padding: 0 6px">Est. ±15%</span></div>
+<span class="num" style="font-size: 60px; font-weight: 600; line-height: 1">{{speed}} <span style="font-size: 22px; color: #a3b6cb">km/h · </span><span style="font-family: 'IBM Plex Sans Thai', sans-serif; font-size: 20px; color: #ffd75a">{{shotType}}</span></span>
+</div>
+</div>
+
+<div class="pn" style="position: absolute; right: 32px; top: 32px; width: 440px; padding: 14px 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px">
+<div><div class="lb" style="font-size: 13px">Pipeline fps</div><div class="num" style="font-size: 28px; font-weight: 600">60</div></div>
+<div><div class="lb" style="font-size: 13px">Latency</div><div class="num" style="font-size: 28px; font-weight: 600">{{latency}} ms</div></div>
+<div><div class="lb" style="font-size: 13px">Players tracked</div><div class="num" style="font-size: 28px; font-weight: 600; color: #4be3a0">4 / 4</div></div>
+<div><div class="lb" style="font-size: 13px">Shuttle conf.</div><div class="num" style="font-size: 28px; font-weight: 600">{{conf}}</div></div>
+<div style="grid-column: 1 / -1; font-size: 14px; color: #a3b6cb">กล้องมือถือบนขาตั้ง → PC ผ่าน SRT · 1080p60</div>
+</div>
+
+<div style="position: absolute; left: 32px; top: 822px; width: 760px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
+<sc-for list="{{cards}}" as="c" hint-placeholder-count="4">
+<div class="pn" style="overflow: hidden; display: flex; flex-direction: column">
+<div style="{{c.stripe}}"></div>
+<div style="padding: 10px 16px 12px; display: flex; flex-direction: column; gap: 6px">
+<div style="display: flex; align-items: baseline; gap: 10px">
+<span style="font-size: 22px; font-weight: 600">{{c.name}}</span>
+<span style="font-size: 14px; color: #a3b6cb">{{c.team}}</span>
+<span class="num" style="margin-left: auto; font-size: 30px; font-weight: 700; line-height: 1">{{c.hr}}</span>
+<span class="lb" style="font-size: 13px">bpm · BLE</span>
+</div>
+<div style="display: flex; align-items: center; gap: 12px">
+<span class="lb" style="font-size: 13px; width: 40px">Move</span>
+<div style="flex: 1; height: 8px; border-radius: 3px; background: rgba(130,170,215,.18)"><div style="{{c.bar}}"></div></div>
+<span class="num" style="font-size: 18px; width: 64px; text-align: right">{{c.spd}} m/s</span>
+<span class="num" style="font-size: 18px; width: 72px; text-align: right; color: #a3b6cb">{{c.dist}} m</span>
+</div>
+</div>
+</div>
+</sc-for>
+</div>
+
+<div class="pn" style="position: absolute; left: 812px; top: 822px; width: 528px; height: 226px; padding: 12px 18px; display: flex; flex-direction: column; gap: 8px">
+<span class="lb">Shot log</span>
+<sc-for list="{{log}}" as="e" hint-placeholder-count="4">
+<div style="display: flex; align-items: center; gap: 10px; font-size: 18px">
+<span style="{{e.dot}}"></span>
+<span>{{e.txt}}</span>
+</div>
+</sc-for>
+</div>
+
+<div class="pn" style="position: absolute; left: 1368px; top: 760px; width: 520px; height: 288px; padding: 12px 24px; display: flex; flex-direction: column; gap: 10px">
+<div style="display: flex; align-items: center"><span class="lb">Court map</span><span style="margin-left: auto; font-size: 13px; color: #a3b6cb">แปลงพิกัดด้วย homography</span></div>
+<div style="position: relative; width: 470px; height: 214px; background: #12355b; border: 2px solid rgba(232,240,248,.6); box-sizing: border-box">
+<div class="ln" style="left: 0; top: 7.5%; width: 100%; height: 1px"></div>
+<div class="ln" style="left: 0; top: 92.5%; width: 100%; height: 1px"></div>
+<div class="ln" style="left: 5.7%; top: 0; width: 1px; height: 100%"></div>
+<div class="ln" style="left: 94.3%; top: 0; width: 1px; height: 100%"></div>
+<div class="ln" style="left: 35.2%; top: 0; width: 1px; height: 100%"></div>
+<div class="ln" style="left: 64.8%; top: 0; width: 1px; height: 100%"></div>
+<div class="ln" style="left: 0; top: 50%; width: 35.2%; height: 1px"></div>
+<div class="ln" style="left: 64.8%; top: 50%; width: 35.2%; height: 1px"></div>
+<div style="position: absolute; left: 50%; top: -8px; height: calc(100% + 16px); border-left: 2px dashed #ffffff"></div>
+<sc-for list="{{mapDots}}" as="d" hint-placeholder-count="4">
+<div style="{{d.style}}"></div>
+</sc-for>
+<sc-if value="{{shuttle.show}}" hint-placeholder-val="{{ true }}">
+<div style="{{shuttle.mapStyle}}"></div>
+</sc-if>
+</div>
+<div style="display: flex; font-size: 14px; color: #a3b6cb"><span>ทีมเรา</span><span style="margin-left: auto">คู่แข่ง</span></div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"running":{"editor":"boolean","default":true},"showBoxes":{"editor":"boolean","default":true},"$preview":{"width":1920,"height":1080}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = {
+      players: [
+        { name: 'ต้น', team: 0, color: '#3fd0f0', u: 0.3, v: 0.8, tu: 0.3, tv: 0.8, dist: 0, spd: 0, hr: 118 },
+        { name: 'เบล', team: 0, color: '#4be3a0', u: 0.68, v: 0.64, tu: 0.68, tv: 0.64, dist: 0, spd: 0, hr: 112 },
+        { name: 'ฟ้า', team: 1, color: '#b892ff', u: 0.36, v: 0.3, tu: 0.36, tv: 0.3, dist: 0, spd: 0, hr: 121 },
+        { name: 'กอล์ฟ', team: 1, color: '#ffc247', u: 0.7, v: 0.14, tu: 0.7, tv: 0.14, dist: 0, spd: 0, hr: 109 }
+      ],
+      score: [11, 9], games: [1, 0], rallyNo: 21, serveTeam: 0,
+      rallyT: 0, shots: 1, hitter: 0, recv: 2, t: 0, dur: 1.2, type: 1, speed: 128,
+      su: 0.3, sv: 0.8, eu: 0.36, ev: 0.12, rallyLen: 9, pause: 0, log: []
+    };
+  }
+
+  componentDidMount() {
+    var self = this;
+    this._iv = setInterval(function () {
+      if (self.props.running ?? true) self.step(0.05);
+    }, 50);
+  }
+
+  componentWillUnmount() {
+    clearInterval(this._iv);
+  }
+
+  types() {
+    return [
+      { n: 'ตบ', min: 190, max: 300, dur: 0.45, pk: 0.3, d: 0.75 },
+      { n: 'เคลียร์', min: 110, max: 170, dur: 1.25, pk: 2.4, d: 0.92 },
+      { n: 'ดรอป', min: 45, max: 85, dur: 0.95, pk: 1.2, d: 0.2 },
+      { n: 'ดาด', min: 110, max: 170, dur: 0.62, pk: 0.4, d: 0.55 },
+      { n: 'หยอดหน้าเน็ต', min: 20, max: 40, dur: 0.7, pk: 0.3, d: 0.08 }
+    ];
+  }
+
+  shot(players, hitter, shots, log) {
+    var types = this.types();
+    var ti = Math.floor(Math.random() * types.length);
+    var ty = types[ti];
+    var hp = players[hitter];
+    var opp = [];
+    players.forEach(function (p, i) { if (p.team !== hp.team) opp.push(i); });
+    var recv = opp[Math.floor(Math.random() * opp.length)];
+    var far = players[recv].team === 1;
+    var off = 0.04 + ty.d * 0.42;
+    var ev = far ? 0.5 - off : 0.5 + off;
+    var eu = 0.12 + Math.random() * 0.76;
+    players.forEach(function (p, i) {
+      var R = Math.random();
+      if (i === recv) { p.tu = eu; p.tv = ev; }
+      else if (i === hitter) { p.tu = 0.25 + R * 0.5; p.tv = p.team === 0 ? 0.68 + R * 0.12 : 0.2 + R * 0.12; }
+      else if (p.team !== hp.team) { p.tu = eu < 0.5 ? 0.62 + R * 0.22 : 0.16 + R * 0.22; p.tv = far ? 0.16 + R * 0.24 : 0.6 + R * 0.25; }
+      else { p.tu = hp.u < 0.5 ? 0.6 + R * 0.22 : 0.18 + R * 0.22; p.tv = p.team === 0 ? 0.6 + R * 0.25 : 0.12 + R * 0.25; }
+    });
+    var speed = Math.round(ty.min + Math.random() * (ty.max - ty.min));
+    return {
+      hitter: hitter, recv: recv, t: 0, dur: ty.dur * (0.9 + Math.random() * 0.2), type: ti, speed: speed, shots: shots,
+      su: hp.u, sv: hp.v, eu: eu, ev: ev,
+      log: [{ txt: hp.name + ' · ' + ty.n + ' · ' + speed + ' km/h', col: hp.color }].concat(log).slice(0, 5)
+    };
+  }
+
+  serve(players, team, log) {
+    var idx = -1;
+    players.forEach(function (p, i) { if (p.team === team && idx < 0) idx = i; });
+    var res = this.shot(players, idx, 1, log);
+    res.rallyT = 0;
+    res.rallyLen = 4 + Math.floor(Math.random() * 12);
+    res.rallyNo = this.state.rallyNo + 1;
+    res.pause = 0;
+    return res;
+  }
+
+  step(dt) {
+    var s = this.state;
+    var players = s.players.map(function (p) {
+      var du = (p.tu - p.u) * 6.1, dv = (p.tv - p.v) * 13.4;
+      var d = Math.sqrt(du * du + dv * dv);
+      var m = Math.min(d, 4.2 * dt);
+      var k = d > 0 ? m / d : 0;
+      var spd = p.spd * 0.8 + (m / dt) * 0.2;
+      var hrT = 100 + spd * 14 + (s.pause > 0 ? -5 : 18);
+      return Object.assign({}, p, {
+        u: p.u + (p.tu - p.u) * k, v: p.v + (p.tv - p.v) * k,
+        dist: p.dist + m, spd: spd, hr: p.hr + (hrT - p.hr) * 0.02
+      });
+    });
+    var n = { players: players };
+    if (s.pause > 0) {
+      n.pause = s.pause - dt;
+      if (n.pause <= 0) Object.assign(n, this.serve(players, s.serveTeam, s.log));
+      this.setState(n);
+      return;
+    }
+    n.rallyT = s.rallyT + dt;
+    n.t = s.t + dt / s.dur;
+    if (n.t >= 1) {
+      if (s.shots >= s.rallyLen) {
+        var win = players[s.hitter].team;
+        var sc = s.score.slice();
+        var gm = s.games.slice();
+        sc[win] += 1;
+        var txt = 'แต้ม' + (win === 0 ? 'ทีมเรา' : 'คู่แข่ง') + ' · ' + sc[0] + '–' + sc[1];
+        if (sc[win] >= 21) { gm[win] += 1; sc = [0, 0]; txt = (win === 0 ? 'ทีมเรา' : 'คู่แข่ง') + 'ชนะเกม'; }
+        n.score = sc; n.games = gm; n.pause = 2.6; n.t = 1; n.serveTeam = win;
+        n.log = [{ txt: txt, col: '#ff5d6c' }].concat(s.log).slice(0, 5);
+      } else {
+        Object.assign(n, this.shot(players, s.recv, s.shots + 1, s.log));
+      }
+    }
+    this.setState(n);
+  }
+
+  renderVals() {
+    var s = this.state;
+    var P = function (u, v, h) {
+      var Z = 1 + (1 - v) * 1.2;
+      return { x: 960 + (u - 0.5) * 1200 / Z, y: -126.7 + 1026.7 / Z - (h || 0) * 197 / Z, Z: Z };
+    };
+    var r = function (n) { return Math.round(n * 10) / 10; };
+    if (!this._court) {
+      var pt = function (u, v, h) { var p = P(u, v, h); return r(p.x) + ' ' + r(p.y); };
+      var seg = function (u1, v1, u2, v2, h) { return 'M' + pt(u1, v1, h) + 'L' + pt(u2, v2, h); };
+      var quad = function (u1, v1, u2, v2) { return 'M' + pt(u1, v1) + 'L' + pt(u2, v1) + 'L' + pt(u2, v2) + 'L' + pt(u1, v2) + 'Z'; };
+      this._court = {
+        floor: quad(-0.45, -0.12, 1.45, 1.4),
+        area: quad(0, 0, 1, 1),
+        lines: [quad(0, 0, 1, 1), seg(0.0754, 0, 0.0754, 1), seg(0.9246, 0, 0.9246, 1), seg(0, 0.3522, 1, 0.3522), seg(0, 0.6478, 1, 0.6478), seg(0, 0.0567, 1, 0.0567), seg(0, 0.9433, 1, 0.9433), seg(0.5, 0, 0.5, 0.3522), seg(0.5, 0.6478, 0.5, 1)].join(''),
+        mesh: 'M' + pt(-0.02, 0.5, 1.55) + 'L' + pt(1.02, 0.5, 1.55) + 'L' + pt(1.02, 0.5, 0.8) + 'L' + pt(-0.02, 0.5, 0.8) + 'Z',
+        net: seg(-0.02, 0.5, 1.02, 0.5, 1.55),
+        posts: 'M' + pt(-0.02, 0.5, 0) + 'L' + pt(-0.02, 0.5, 1.55) + 'M' + pt(1.02, 0.5, 0) + 'L' + pt(1.02, 0.5, 1.55)
+      };
+    }
+
+    var order = s.players.map(function (p, i) { return i; }).sort(function (a, b) { return s.players[a].v - s.players[b].v; });
+    var players = order.map(function (i) {
+      var p = s.players[i], g = P(p.u, p.v, 0), sc = 197 / g.Z;
+      var bw = 0.78 * sc, bh = 1.85 * sc, rw = 1.05 * sc, rh = rw * 0.32;
+      return {
+        name: p.name,
+        hr: Math.round(p.hr),
+        ringStyle: 'position:absolute;left:' + r(g.x - rw / 2) + 'px;top:' + r(g.y - rh / 2) + 'px;width:' + r(rw) + 'px;height:' + r(rh) + 'px;border:3px solid ' + p.color + ';border-radius:50%;box-shadow:0 0 16px ' + p.color + ';box-sizing:border-box',
+        boxStyle: 'position:absolute;left:' + r(g.x - bw / 2) + 'px;top:' + r(g.y - bh) + 'px;width:' + r(bw) + 'px;height:' + r(bh) + 'px;--c:' + p.color,
+        tagStyle: 'position:absolute;left:' + r(g.x) + 'px;top:' + r(g.y - bh - 12) + 'px;transform:translate(-50%,-100%);display:flex;align-items:baseline;gap:10px;padding:5px 12px;white-space:nowrap;border-top:3px solid ' + p.color
+      };
+    });
+
+    var cards = s.players.map(function (p) {
+      return {
+        name: p.name, team: p.team === 0 ? 'ทีมเรา' : 'คู่แข่ง',
+        hr: Math.round(p.hr), dist: p.dist.toFixed(1), spd: p.spd.toFixed(1),
+        stripe: 'height:4px;background:' + p.color,
+        bar: 'height:100%;border-radius:3px;background:' + p.color + ';width:' + Math.min(100, p.spd / 5 * 100).toFixed(0) + '%'
+      };
+    });
+
+    var mapDots = s.players.map(function (p) {
+      return { style: 'position:absolute;left:' + r((1 - p.v) * 466 - 9) + 'px;top:' + r(p.u * 210 - 9) + 'px;width:18px;height:18px;border-radius:50%;background:' + p.color + ';border:2px solid #0a111b;box-sizing:border-box' };
+    });
+
+    var ty = this.types()[s.type];
+    var t = Math.min(s.t, 1), paused = s.pause > 0;
+    var su = s.su + (s.eu - s.su) * t, sv = s.sv + (s.ev - s.sv) * t;
+    var sh = (1 - t) * 2.3 + t * 0.9 + 4 * ty.pk * t * (1 - t);
+    var sp = P(su, sv, sh);
+    var outFrame = sp.y < 200;
+    var ry = Math.max(sp.y, 200);
+    var shuttle = {
+      show: !paused,
+      retStyle: 'position:absolute;left:' + r(sp.x - 30) + 'px;top:' + r(ry - 30) + 'px;width:60px;height:60px;--c:#ffd75a',
+      labelStyle: 'position:absolute;left:' + r(sp.x + 46) + 'px;top:' + r(ry - 50) + 'px;display:flex;flex-direction:column;gap:2px;padding:8px 14px;white-space:nowrap',
+      mapStyle: 'position:absolute;left:' + r((1 - sv) * 466 - 5) + 'px;top:' + r(su * 210 - 5) + 'px;width:10px;height:10px;border-radius:50%;background:#ffffff;box-shadow:0 0 8px #ffd75a'
+    };
+
+    var cs = Math.floor(s.rallyT * 100);
+    var pad = function (x) { return (x < 10 ? '0' : '') + x; };
+    var rallyTime = pad(Math.floor(cs / 6000)) + ':' + pad(Math.floor(cs / 100) % 60) + '.' + pad(cs % 100);
+
+    var log = s.log.map(function (e) {
+      return { txt: e.txt, dot: 'width:10px;height:10px;border-radius:50%;flex:none;background:' + e.col };
+    });
+
+    return {
+      court: this._court,
+      players: players, cards: cards, mapDots: mapDots, shuttle: shuttle, log: log,
+      showBoxes: this.props.showBoxes ?? true,
+      lockName: s.players[s.hitter].name,
+      lockNote: outFrame ? 'ลูกออกนอกเฟรม · คาดตำแหน่ง' : ty.n,
+      speed: s.speed, shotType: ty.n, shots: s.shots, rallyTime: rallyTime,
+      rallyNo: s.rallyNo,
+      scoreA: s.score[0], scoreB: s.score[1], gamesA: s.games[0], gamesB: s.games[1],
+      serveA: s.serveTeam === 0, serveB: s.serveTeam === 1,
+      latency: 128 + Math.round(6 * Math.sin(s.rallyT * 1.7)),
+      conf: outFrame ? '0.41' : (0.86 + 0.06 * Math.sin(s.rallyT * 2.3)).toFixed(2)
+    };
+  }
+}
+</script>
+</body>
+</html>

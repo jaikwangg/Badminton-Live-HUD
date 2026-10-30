@@ -1,3 +1,4 @@
+# working dir and generated media (the media itself is kept in /media via Git LFS)
 work/
 *.mov
 *.mp4
@@ -5,5 +6,3 @@ work/
 *.pt
 fonts/
 __pycache__/
-check/*.jpg
-check/*.png

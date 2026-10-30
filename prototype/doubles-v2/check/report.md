@@ -99,9 +99,9 @@
 
 ## แก้ไขผลเอง
 
-แก้ `config.json` แล้วรัน `python3 shots.py && python3 report.py && python3 render.py out.mp4`
+แก้ `config.json` แล้วรัน `python3 shots.py && python3 report.py && python3 render_v3.py out.mp4`
 
 - เพิ่มช็อต: `"add_shots": [{"t": 12.34, "player": "บอส"}]`
 - ลบช็อต: `"remove_shots": [12.34]` (ลบช็อตที่ห่างไม่เกิน 0.15 วิ)
-- เวลาจบแรลลี่: `"rally_end": {"3": 41.2}`
+- เวลาจบแรลลี่: `"rally_end": {"40.0": 41.2}` (key = เวลาใดก็ได้ในแรลลี่)
 - เสียงช้า/เร็วกว่าภาพ: `"audio_offset": 0.05`

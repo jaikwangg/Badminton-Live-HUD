@@ -64,7 +64,15 @@ HUD_PREVIEW=20.4 python3 pipeline/render_mp4.py out/preview.png                 
 | `players.json` | ตำแหน่ง/ความเร็ว/ระยะของ 4 คนทุกเฟรม (30 fps) |
 | `events.json` | shot, rally, สัญญาณการเหวี่ยงแขน |
 
-**ไม่ได้ใส่ใน repo:** คลิปต้นฉบับ (204 MB เกินลิมิต GitHub 100 MB), `audio.wav` และ `clip720.mp4` เพราะ repo นี้เป็น public และคลิปเห็นหน้าผู้เล่นกับคนคอร์ทข้างๆ รวมถึงไฟล์โมเดล `*.pt` ตามกติกาใน `AGENTS.md`
+**ภาพตรวจ** อยู่ใน `check/`: `verify*.jpg` (ชื่อบนเฟรมจริง), `hud16x9_*.jpg` และ `hud9x16_*.jpg` (preview HUD)
+
+**คลิปและวิดีโอ** อยู่ใน branch [`media`](https://github.com/jaikwangg/Badminton-Live-HUD/tree/media/stage1-offline-v0):
+- คลิปต้นฉบับ 205 MB แบ่งเป็น 3 ส่วนเพราะ GitHub รับไฟล์ละไม่เกิน 100 MB รวมกลับด้วย `cat source_IMG_5341.mov.part* > data/source.mov`
+- `clip720.mp4` (วางที่ `site/` แล้วเปิด `site/index.html` ได้เลย), `audio.wav`, วิดีโอ HUD 16:9 และ 9:16
+
+ไม่มีไฟล์โมเดล `*.pt` ใน repo ตามกติกาใน `AGENTS.md`
+
+ความคืบหน้าและบทเรียนรวมของทุก prototype: `docs/PROGRESS.md`, `docs/LESSONS.md`
 
 ## ข้อจำกัดที่เจอ
 

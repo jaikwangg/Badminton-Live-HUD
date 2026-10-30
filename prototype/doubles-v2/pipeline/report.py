@@ -69,8 +69,8 @@ if gaps:
 lines += ['## คำเตือน', '']
 lines += [f"- {w['t']:.2f} วิ (แรลลี่ {w['rally']}): {w['msg']}" for w in E['warnings']] or ['- ไม่มี']
 lines += ['', '## ช่วงในแรลลี่ที่ไม่มีช็อตเกิน 2.4 วิ', ''] + ([f'- แรลลี่ {n}: {a:.2f}–{b:.2f} วิ' for n, a, b in gaps] or ['- ไม่มี'])
-lines += ['', '## แก้ไขผลเอง', '', 'แก้ `config.json` แล้วรัน `python3 shots.py && python3 report.py && python3 render.py out.mp4`', '',
+lines += ['', '## แก้ไขผลเอง', '', 'แก้ `config.json` แล้วรัน `python3 shots.py && python3 report.py && python3 render_v3.py out.mp4`', '',
           '- เพิ่มช็อต: `"add_shots": [{"t": 12.34, "player": "บอส"}]`', '- ลบช็อต: `"remove_shots": [12.34]` (ลบช็อตที่ห่างไม่เกิน 0.15 วิ)',
-          '- เวลาจบแรลลี่: `"rally_end": {"3": 41.2}`', '- เสียงช้า/เร็วกว่าภาพ: `"audio_offset": 0.05`']
+          '- เวลาจบแรลลี่: `"rally_end": {"40.0": 41.2}` (key = เวลาใดก็ได้ในแรลลี่)', '- เสียงช้า/เร็วกว่าภาพ: `"audio_offset": 0.05`']
 open('check/report.md', 'w').write('\n'.join(lines))
 print('report written:', len(E['rallies']), 'rallies,', len(gaps), 'gaps,', len(E['warnings']), 'warnings')

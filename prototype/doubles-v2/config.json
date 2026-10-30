@@ -1,5 +1,5 @@
 {
- "_help": "แก้ไฟล์นี้แล้วรัน python3 shots.py && python3 report.py && python3 render.py out.mp4  (เวลาเป็นวินาทีในคลิป)",
+ "_help": "แก้ไฟล์นี้แล้วรัน python3 shots.py && python3 report.py && python3 render_v3.py out.mp4  (เวลาเป็นวินาทีในคลิป)",
  "players": [
   {
    "name": "บอส",

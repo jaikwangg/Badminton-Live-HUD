@@ -1,4 +1,4 @@
-# วิดีโอ/เสียงจากคลิปจริง (repo เป็น public) และไฟล์ขนาดใหญ่
+# generated media inside the prototype folder (the media itself is kept in /media via Git LFS)
 data/source.mov
 data/*.mov
 data/*.mp4
