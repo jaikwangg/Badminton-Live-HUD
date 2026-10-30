@@ -12,12 +12,13 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from hud.bus.messages import HitMessage
+from hud.bus.messages import Frame, HitMessage
 from hud.config import AppConfig
 from hud.workers import audio
 from hud.workers.audio import (
     AudioHitDetector,
     AudioWorker,
+    RingClock,
     has_audio_input_device,
 )
 
@@ -310,3 +311,98 @@ def test_file_without_audio_track_degrades(tmp_path) -> None:
 def test_file_source_without_ffmpeg_degrades() -> None:
     with patch.object(audio, "find_ffmpeg", return_value=None):
         assert _run_file_source("match.mp4") == []
+
+
+class FakeRing:
+    """Frames as capture writes them: id k = file frame k-1, stamped anchor + (k-1)/fps."""
+
+    def __init__(self, anchor_ns: int, fps: float = 50.0) -> None:
+        self.anchor_ns, self.fps = anchor_ns, fps
+        self.frame_id = 0
+        self.delay_ns = 0  # decode delay before capture stamps the frame
+
+    def advance(self, frames: int, delay_ms: float = 0.0) -> None:
+        self.frame_id += frames
+        self.delay_ns = int(delay_ms * 1e6)
+
+    def read_latest(self) -> Frame | None:
+        if self.frame_id == 0:
+            raise FileNotFoundError("ring not created yet")
+        ts = self.anchor_ns + round((self.frame_id - 1) * 1e9 / self.fps) + self.delay_ns
+        return Frame(self.frame_id, ts, 1, 1, b"")
+
+
+def test_ring_clock_takes_least_delayed_anchor_and_follows_reschedules() -> None:
+    ring = FakeRing(anchor_ns=10_000_000_000)
+    clock = RingClock(ring.read_latest, ring.fps, jump_ms=50.0, window=4)
+    assert clock.anchor_ns() is None  # no ring yet
+
+    for frames, delay_ms in [(30, 6.0), (25, 1.0), (25, 9.0)]:
+        ring.advance(frames, delay_ms)
+        clock.anchor_ns()
+    assert clock.anchor_ns() == ring.anchor_ns + 1_000_000  # jitter is one-sided late
+
+    ring.anchor_ns += 200_000_000  # capture fell behind and rescheduled by 200 ms
+    ring.advance(25)
+    assert clock.anchor_ns() == ring.anchor_ns
+
+    ring.frame_id = 0  # ring gone (capture restarting): keep the last anchor
+    assert clock.anchor_ns() == ring.anchor_ns
+
+
+class FixedClock:
+    def __init__(self, anchor_ns: int) -> None:
+        self.anchor = anchor_ns
+
+    def anchor_ns(self) -> int:
+        return self.anchor
+
+
+@needs_ffmpeg
+def test_file_audio_stamps_hits_from_the_ring_anchor(tmp_path) -> None:
+    clip = tmp_path / "clicks.wav"
+    _write_click_wav(clip, 1.0, [0.3, 0.8])
+    publisher = FakePublisher()
+    worker = AudioWorker(AudioHitDetector(sample_rate=16000, sensitivity=3.0), publisher)
+    # Capture showed file time 0 just now; the 16 ms chunks start before ffmpeg is ready.
+    anchor = time.monotonic_ns() + 200_000_000
+    audio._replay_file(worker, FFMPEG, str(clip), False, 16000, 256, Event(), FixedClock(anchor))
+    hits = [(ts - anchor) / 1e6 for ts in _hit_times(publisher.messages)]
+    assert len(hits) == 2
+    assert abs(hits[0] - 300) <= 20 and abs(hits[1] - 800) <= 20  # within one chunk
+
+
+@needs_ffmpeg
+def test_file_audio_loop_passes_follow_the_video_period(tmp_path) -> None:
+    clip = tmp_path / "loop.wav"
+    _write_click_wav(clip, 0.5, [0.2])
+    stop = Event()
+    publisher = StopAfterHits(stop, 3)
+    worker = AudioWorker(AudioHitDetector(sample_rate=16000, sensitivity=3.0), publisher)
+    anchor = time.monotonic_ns() + 200_000_000
+    # Video loops every 0.6 s (audio track shorter), so each audio pass starts on its pass.
+    audio._replay_file(
+        worker, FFMPEG, str(clip), True, 16000, 256, stop, FixedClock(anchor), video_period_s=0.6
+    )
+    hits = [(ts - anchor) / 1e6 for ts in _hit_times(publisher.messages)]
+    assert len(hits) == 3
+    assert all(abs(hit - (200 + 600 * n)) <= 20 for n, hit in enumerate(hits))
+
+
+@needs_ffmpeg
+def test_file_audio_started_late_skips_to_the_video_position(tmp_path) -> None:
+    clip = tmp_path / "loop.wav"
+    _write_click_wav(clip, 0.5, [0.2])
+    stop = Event()
+    publisher = StopAfterHits(stop, 2)
+    worker = AudioWorker(AudioHitDetector(sample_rate=16000, sensitivity=3.0), publisher)
+    started = time.monotonic_ns()
+    anchor = started - 3_000_000_000  # capture has been looping for 3 s already
+    audio._replay_file(
+        worker, FFMPEG, str(clip), True, 16000, 256, stop, FixedClock(anchor), max_lag_ms=100
+    )
+    hits = _hit_times(publisher.messages)
+    assert len(hits) == 2
+    assert all(ts > started - 200_000_000 for ts in hits)  # stale loops were skipped
+    # Still on the video's loop grid: file time 0.2 s of some pass, within one chunk.
+    assert all(abs(((ts - anchor) / 1e6 - 200 + 25) % 500 - 25) <= 20 for ts in hits)
