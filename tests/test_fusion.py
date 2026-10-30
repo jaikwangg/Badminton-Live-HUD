@@ -340,7 +340,8 @@ def test_doubles_new_track_reattaches_on_same_side_of_net(tmp_path) -> None:
             ],
         ).to_json()
     )
-    # Tracks 10 and 12 drop; a new near-side id appears closer to the far-side slot 2 spot.
+    # Tracks 10 and 12 drop; a new near-side id (beyond the 1 m net slack) appears closer to
+    # the far-side slot 2 spot.
     state.ingest(
         PlayersMessage(
             frame_id=2,
@@ -348,7 +349,7 @@ def test_doubles_new_track_reattaches_on_same_side_of_net(tmp_path) -> None:
             players=[
                 {"track_id": 11, **_foot(1.0, 4.0)},
                 {"track_id": 13, **_foot(12.0, 2.0)},
-                {"track_id": 20, **_foot(6.5, 3.0)},
+                {"track_id": 20, **_foot(5.5, 3.0)},
             ],
         ).to_json()
     )
@@ -357,18 +358,19 @@ def test_doubles_new_track_reattaches_on_same_side_of_net(tmp_path) -> None:
     assert [p["tracked"] for p in players] == [True, True, False, True]
     assert [p["side"] for p in players] == [0, 0, 1, 1]
     assert [p["team"] for p in players] == [0, 0, 1, 1]
-    assert players[0]["court_xy_m"] == pytest.approx([6.5, 3.0])
+    assert players[0]["court_xy_m"] == pytest.approx([5.5, 3.0])
     assert players[2]["img_xy"] is None and players[2]["court_xy_m"] is None
 
 
-def test_new_track_falls_back_to_other_side_when_no_slot_is_free(tmp_path) -> None:
+def test_track_beyond_net_slack_never_takes_the_other_teams_slot(tmp_path) -> None:
     state = _square_court_state(tmp_path)
     state.ingest(
         PlayersMessage(
             frame_id=1, ts=1_000_000, players=[{"track_id": 10, **_foot(2.0, 3.0)}]
         ).to_json()
     )
-    # Only far-side slot 1 is free, so the second near-side track still gets it.
+    # Only far-side slot 1 is free; a second near-side track (an umpire, a duplicate box)
+    # stays unassigned instead of becoming the far player.
     state.ingest(
         PlayersMessage(
             frame_id=2,
@@ -377,8 +379,138 @@ def test_new_track_falls_back_to_other_side_when_no_slot_is_free(tmp_path) -> No
         ).to_json()
     )
     players = state.snapshot()["players"]
-    assert [p["tracked"] for p in players] == [True, True]
-    assert [p["side"] for p in players] == [0, 0]
+    assert [p["tracked"] for p in players] == [True, False]
+    assert [p["side"] for p in players] == [0, 1]
+
+
+def test_feet_inside_net_slack_keep_slot_and_team_side(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    feet = [(3.0, 1.0), (5.5, 4.0), (10.0, 2.0), (10.0, 5.0)]
+    for frame_id, x in enumerate([5.5, 6.2, 6.9, 7.3], start=1):
+        feet[1] = (x, 4.0)
+        state.ingest(
+            PlayersMessage(
+                frame_id=frame_id,
+                ts=frame_id * 1_000_000,
+                players=[{"track_id": 10 + i, **_foot(*xy)} for i, xy in enumerate(feet)],
+            ).to_json()
+        )
+        if frame_id == 1:
+            rusher = next(
+                p["id"]
+                for p in state.snapshot()["players"]
+                if p["court_xy_m"] == pytest.approx([5.5, 4.0])
+            )
+            feet.pop()  # a far player goes undetected, so a far slot is free
+    players = state.snapshot()["players"]
+    assert rusher in (0, 1)
+    assert players[rusher]["court_xy_m"] == pytest.approx([7.3, 4.0])
+    assert [p["side"] for p in players] == [0, 0, 1, 1]
+    assert [p["tracked"] for p in players].count(True) == 3
+
+
+def test_end_change_by_reposting_players_moves_teams(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    feet = [(3.0, 1.0), (3.0, 5.0), (10.0, 1.0), (10.0, 5.0)]
+    message = PlayersMessage(
+        frame_id=1,
+        ts=1_000_000,
+        players=[{"track_id": 10 + i, **_foot(*xy)} for i, xy in enumerate(feet)],
+    )
+    state.ingest(message.to_json())
+    state.set_players(
+        [
+            {"id": i, "name": str(i), "color": None, "team": i // 2, "side": 1 - i // 2}
+            for i in range(4)
+        ],
+        mode="doubles",
+    )
+    state.ingest(message.to_json())
+    players = state.snapshot()["players"]
+    assert [p["side"] for p in players] == [1, 1, 0, 0]
+    assert [p["court_xy_m"][0] for p in players] == pytest.approx([10.0, 10.0, 3.0, 3.0])
+    with pytest.raises(ValueError, match="Teammates"):
+        state.set_players(
+            [
+                {"id": i, "name": None, "color": None, "team": i // 2, "side": i % 2}
+                for i in range(4)
+            ],
+            mode="doubles",
+        )
+
+
+def _sides(state: FusionState) -> list[int]:
+    return [p["side"] for p in state.snapshot()["players"]]
+
+
+def test_game_end_switches_ends_and_counts_the_game(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    state.add_score(1, 20)
+    state.add_score(0, 20)
+    state.add_score(1, 1)  # 20-21: no two-point lead yet
+    assert _sides(state) == [0, 0, 1, 1]
+    state.add_score(1, 1)  # 20-22 wins the game
+    match = state.snapshot()["match"]
+    assert (match["games"], match["score"]) == ([0, 1], [0, 0])
+    assert _sides(state) == [1, 1, 0, 0]
+    state._score = [29, 29]  # a long deuce, set directly
+    state.suggest_point(5, None, suggested_team=0)
+    state.confirm_point(5, accept=True)  # 30-29: the 30th point wins without a lead of two
+    assert state.snapshot()["match"]["games"] == [1, 1]
+    assert _sides(state) == [0, 0, 1, 1]
+
+
+def test_deciding_game_switches_ends_once_at_eleven(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    state._games = [1, 1]
+    state.add_score(0, 10)
+    state.add_score(1, 10)
+    assert _sides(state) == [0, 0, 1, 1]
+    state.add_score(1, 1)  # the leader first reaches 11
+    assert _sides(state) == [1, 1, 0, 0]
+    state.add_score(1, -1)  # an operator correction and the 11th point again: no re-switch
+    state.add_score(1, 1)
+    state.add_score(0, 1)
+    assert _sides(state) == [1, 1, 0, 0]
+
+
+def test_returning_track_is_matched_by_appearance_gallery(tmp_path) -> None:
+    state = FusionState(
+        tmp_path / "court_calib.json",
+        fusion={"identity": {"gallery_s": 1.0, "app_window_frames": 2}},
+    )
+    state.calibrate([[0, 0], [100, 0], [100, 100], [0, 100]])
+    state.set_players(
+        [
+            {"id": i, "name": str(i), "color": None, "team": i // 2, "side": i // 2}
+            for i in range(4)
+        ],
+        mode="doubles",
+    )
+    app_a, app_b = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+    ts = 0
+    for _ in range(40):  # 1.3 s: both far slots fill their galleries
+        ts += 33_333_333
+        far = [
+            {"track_id": 10, **_foot(10.0, 1.0), "app": app_a},
+            {"track_id": 11, **_foot(10.0, 5.0), "app": app_b},
+        ]
+        state.ingest(PlayersMessage(frame_id=1, ts=ts, players=far).to_json())
+    a_slot = next(
+        p["id"]
+        for p in state.snapshot()["players"]
+        if p["court_xy_m"] == pytest.approx([10.0, 1.0])
+    )
+    assert state._gallery[a_slot] == pytest.approx(app_a)
+    for _ in range(2):  # a lighting change fills A's short running window with B's colours
+        ts += 33_333_333
+        far[0]["app"] = app_b
+        state.ingest(PlayersMessage(frame_id=2, ts=ts, players=far).to_json())
+    # Both far tracks vanish; A comes back alone, a bit closer to where B was last seen.
+    ts += 1_000_000_000
+    back = [{"track_id": 20, **_foot(10.0, 3.2), "app": app_a}]
+    state.ingest(PlayersMessage(frame_id=3, ts=ts, players=back).to_json())
+    assert state.snapshot()["players"][a_slot]["court_xy_m"] == pytest.approx([10.0, 3.2])
 
 
 def _walk_state(tmp_path, positions: list[tuple[float, float]], **players: float) -> dict:
@@ -478,11 +610,13 @@ def test_swap_ids_moves_tracks_but_names_stay_with_ids(tmp_path) -> None:
     assert swapped[1]["img_xy"] == near["foot_px"]
     assert (swapped[1]["name"], swapped[1]["color"], swapped[1]["team"]) == ("B", "#000", 1)
     assert (swapped[0]["name"], swapped[0]["img_xy"]) == ("A", far["foot_px"])
-    # The next frame keeps feeding track 10 into id 1.
+    # A cross-team swap is a correction, not an end change: team sides stay, so the next
+    # frame puts each track back on the team that plays from its side.
+    assert [p["side"] for p in swapped] == [0, 1]
     state.ingest(PlayersMessage(frame_id=2, ts=2_000_000, players=[near, far]).to_json())
     players = state.snapshot()["players"]
-    assert (players[1]["name"], players[1]["img_xy"]) == ("B", near["foot_px"])
-    assert (players[0]["name"], players[0]["img_xy"]) == ("A", far["foot_px"])
+    assert (players[0]["name"], players[0]["img_xy"]) == ("A", near["foot_px"])
+    assert (players[1]["name"], players[1]["img_xy"]) == ("B", far["foot_px"])
 
 
 def test_shuttle_has_no_court_position_while_flying(tmp_path) -> None:
