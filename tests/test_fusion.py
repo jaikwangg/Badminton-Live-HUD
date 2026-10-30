@@ -92,7 +92,8 @@ def test_doubles_game_state_contains_four_players_and_two_per_side(tmp_path) -> 
             {"id": 1, "name": "B", "color": "#000", "side": 0},
             {"id": 2, "name": "C", "color": "#f00", "side": 1},
             {"id": 3, "name": "D", "color": "#00f", "side": 1},
-        ]
+        ],
+        mode="doubles",
     )
     state.ingest(
         PlayersMessage(
@@ -121,7 +122,8 @@ def test_doubles_court_points_use_full_doubles_width(tmp_path) -> None:
             {"id": 1, "name": "B", "color": None, "side": 0},
             {"id": 2, "name": "C", "color": None, "side": 1},
             {"id": 3, "name": "D", "color": None, "side": 1},
-        ]
+        ],
+        mode="doubles",
     )
     state.ingest(
         PlayersMessage(
@@ -135,19 +137,34 @@ def test_doubles_court_points_use_full_doubles_width(tmp_path) -> None:
     )
 
     snapshot = state.snapshot()
-    assert snapshot["players"][0]["court_xy_m"][1] == pytest.approx(0.061)
-    assert snapshot["players"][1]["court_xy_m"][1] == pytest.approx(6.039)
+    # Both feet are past the net (x ~ 12.7 m), so they take the far-side slots 2 and 3.
+    assert snapshot["players"][2]["court_xy_m"][1] == pytest.approx(0.061)
+    assert snapshot["players"][3]["court_xy_m"][1] == pytest.approx(6.039)
 
 
 def test_players_require_two_or_four_with_one_or_two_per_side() -> None:
     state = FusionState()
-    with pytest.raises(ValueError, match="two or four"):
+    with pytest.raises(ValueError, match="exactly 2"):
         state.set_players([{"id": 0, "name": "A", "color": "#fff", "side": 0}])
     with pytest.raises(ValueError, match="Each side"):
         state.set_players(
             [
                 {"id": player_id, "name": str(player_id), "color": None, "side": 0}
                 for player_id in range(4)
+            ],
+            mode="doubles",
+        )
+    with pytest.raises(ValueError, match="Each team"):
+        state.set_players(
+            [
+                {
+                    "id": player_id,
+                    "name": str(player_id),
+                    "color": None,
+                    "team": 0,
+                    "side": player_id,
+                }
+                for player_id in range(2)
             ]
         )
 
@@ -220,19 +237,32 @@ def test_operator_api_and_websocket_serve_contract_state(tmp_path) -> None:
         api_client.post(
             "/api/players",
             json={
+                "mode": "doubles",
                 "players": [
-                    {"id": 0, "name": "A", "color": "#fff", "side": 0},
-                    {"id": 1, "name": "B", "color": "#000", "side": 0},
-                    {"id": 2, "name": "C", "color": "#f00", "side": 1},
-                    {"id": 3, "name": "D", "color": "#00f", "side": 1},
-                ]
+                    {"id": 0, "name": "A", "color": "#fff", "team": 0, "side": 0},
+                    {"id": 1, "name": "B", "color": "#000", "team": 0, "side": 0},
+                    {"id": 2, "name": "C", "color": "#f00", "team": 1, "side": 1},
+                    {"id": 3, "name": "D", "color": "#00f", "team": 1, "side": 1},
+                ],
             },
         ).status_code
         == 200
     )
+    assert state.snapshot()["match"]["mode"] == "doubles"
+    assert [player["team"] for player in state.snapshot()["players"]] == [0, 0, 1, 1]
+    four_without_mode = {
+        "players": [
+            {"id": i, "name": str(i), "color": None, "team": i // 2, "side": i // 2}
+            for i in range(4)
+        ]
+    }
+    assert api_client.post("/api/players", json=four_without_mode).status_code == 422
     assert api_client.post("/api/players", json={"players": []}).status_code == 422
     assert api_client.post("/api/players", json={"players": [{}, {}, {}]}).status_code == 422
     assert api_client.post("/api/score", json={"side": 1, "delta": 1}).status_code == 200
+    assert api_client.post("/api/score", json={"team": 0, "delta": 2}).status_code == 200
+    assert state.snapshot()["match"]["score"] == [2, 1]
+    assert api_client.post("/api/score", json={"team": 2, "delta": 1}).status_code == 422
     assert api_client.post("/api/swap_ids", json={"a": 0, "b": 1}).status_code == 200
     assert api_client.post("/api/calibrate", json={"corners_px": []}).status_code == 422
 
@@ -271,3 +301,123 @@ def test_new_track_ids_reattach_to_nearest_player(tmp_path) -> None:
     assert [player["tracked"] for player in snapshot["players"]] == [True, True]
     assert snapshot["players"][0]["img_xy"] == [50, 90]
     assert snapshot["players"][1]["img_xy"] == [50, 10]
+
+
+def _foot(x_m: float, y_m: float) -> dict[str, object]:
+    # Inverse of the 100x100 px calibration below: px y=0 is the far baseline.
+    px = [y_m / 6.10 * 100, (1 - x_m / 13.40) * 100]
+    return {"bbox": [px[0] - 5, px[1] - 40, px[0] + 5, px[1]], "foot_px": px, "conf": 0.9}
+
+
+def _square_court_state(tmp_path) -> FusionState:
+    state = FusionState(tmp_path / "court_calib.json")
+    state.calibrate([[0, 0], [100, 0], [100, 100], [0, 100]])
+    return state
+
+
+def test_doubles_new_track_reattaches_on_same_side_of_net(tmp_path) -> None:
+    state = _square_court_state(tmp_path)
+    state.set_players(
+        [
+            {"id": i, "name": str(i), "color": None, "team": i // 2, "side": i // 2}
+            for i in range(4)
+        ],
+        mode="doubles",
+    )
+    state.ingest(
+        PlayersMessage(
+            frame_id=1,
+            ts=1_000_000,
+            players=[
+                {"track_id": 10, **_foot(5.0, 1.0)},
+                {"track_id": 11, **_foot(1.0, 4.0)},
+                {"track_id": 12, **_foot(7.0, 3.0)},
+                {"track_id": 13, **_foot(12.0, 2.0)},
+            ],
+        ).to_json()
+    )
+    # Tracks 10 and 12 drop; a new near-side id appears closer to the far-side slot 2 spot.
+    state.ingest(
+        PlayersMessage(
+            frame_id=2,
+            ts=2_000_000,
+            players=[
+                {"track_id": 11, **_foot(1.0, 4.0)},
+                {"track_id": 13, **_foot(12.0, 2.0)},
+                {"track_id": 20, **_foot(6.5, 3.0)},
+            ],
+        ).to_json()
+    )
+
+    players = state.snapshot()["players"]
+    assert [p["tracked"] for p in players] == [True, True, False, True]
+    assert [p["side"] for p in players] == [0, 0, 1, 1]
+    assert [p["team"] for p in players] == [0, 0, 1, 1]
+    assert players[0]["court_xy_m"] == pytest.approx([6.5, 3.0])
+    assert players[2]["img_xy"] is None and players[2]["court_xy_m"] is None
+
+
+def test_new_track_falls_back_to_other_side_when_no_slot_is_free(tmp_path) -> None:
+    state = _square_court_state(tmp_path)
+    state.ingest(
+        PlayersMessage(
+            frame_id=1, ts=1_000_000, players=[{"track_id": 10, **_foot(2.0, 3.0)}]
+        ).to_json()
+    )
+    # Only far-side slot 1 is free, so the second near-side track still gets it.
+    state.ingest(
+        PlayersMessage(
+            frame_id=2,
+            ts=2_000_000,
+            players=[{"track_id": 10, **_foot(2.0, 3.0)}, {"track_id": 11, **_foot(3.0, 2.0)}],
+        ).to_json()
+    )
+    players = state.snapshot()["players"]
+    assert [p["tracked"] for p in players] == [True, True]
+    assert [p["side"] for p in players] == [0, 0]
+
+
+def test_off_court_feet_do_not_skew_distance_or_matching(tmp_path) -> None:
+    state = _square_court_state(tmp_path)
+    off_court = {"bbox": [0, 0, 1, 50], "foot_px": [1, 50], "conf": 0.9}  # y < 0.46 m
+    frames = [
+        [{"track_id": 10, **_foot(3.0, 3.0)}],
+        [{"track_id": 10, **off_court}],
+        [{"track_id": 10, **_foot(4.0, 3.0)}],
+        [{"track_id": 10, **_foot(5.0, 3.0)}],
+    ]
+    for frame_id, players in enumerate(frames, start=1):
+        state.ingest(
+            PlayersMessage(
+                frame_id=frame_id, ts=frame_id * 1_000_000_000, players=players
+            ).to_json()
+        )
+        if frame_id == 3:
+            # 1 m over 2 s from the last valid position, not a jump via (0, 0).
+            player = state.snapshot()["players"][0]
+            assert player["dist_m"] == pytest.approx(1.0)
+            assert player["speed_mps"] == pytest.approx(0.5)
+        if frame_id == 2:
+            player = state.snapshot()["players"][0]
+            assert player["court_xy_m"] is None and player["speed_mps"] is None
+            assert player["dist_m"] is None
+    player = state.snapshot()["players"][0]
+    assert player["dist_m"] == pytest.approx(2.0)
+    assert player["speed_mps"] == pytest.approx(0.35 * 1.0 + 0.65 * 0.5)  # EMA still smooths
+    assert state._player_history[0][1:] == pytest.approx((5.0, 3.0))
+
+
+def test_players_message_with_appearance_vector_is_accepted(tmp_path) -> None:
+    state = _square_court_state(tmp_path)
+    state.ingest(
+        json.dumps(
+            {
+                "v": 1,
+                "type": "players",
+                "frame_id": 1,
+                "ts": 1_000_000,
+                "players": [{"track_id": 10, **_foot(2.0, 3.0), "app": [0.1, 0.5, 0.3]}],
+            }
+        )
+    )
+    assert state.snapshot()["players"][0]["tracked"] is True
