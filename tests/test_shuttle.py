@@ -348,3 +348,31 @@ def test_run_binds_the_configured_bus_endpoint(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(RuntimeError, match="stop"):
         shuttle_worker.run(config)
     assert bound == ["tcp://127.0.0.1:59998"]
+
+
+def test_run_passes_the_configured_background_sample_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config()
+    config.models["shuttle"]["background_sample_span_s"] = 4.5
+    spans: list[float] = []
+
+    class Closable:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+
+        def close(self) -> None: ...
+
+    tracker = types.SimpleNamespace(width=512, height=288)
+
+    def fake_background(*args: object, sample_span_s: float) -> None:
+        spans.append(sample_span_s)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(shuttle_worker, "ZmqPublisher", Closable)
+    monkeypatch.setattr(shuttle_worker, "SharedFrameRing", Closable)
+    monkeypatch.setattr(shuttle_worker, "_send_startup_heartbeat", lambda publisher: None)
+    monkeypatch.setattr(shuttle_worker, "_load_and_warmup", lambda settings: tracker)
+    monkeypatch.setattr(shuttle_worker, "MedianBackground", fake_background)
+    with pytest.raises(RuntimeError, match="stop"):
+        shuttle_worker.run(config)
+    assert spans == [4.5]

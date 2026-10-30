@@ -20,8 +20,7 @@ from hud.models.shuttle import ResizedFrame, ShuttleTracker, create_shuttle_trac
 
 LOGGER = logging.getLogger(__name__)
 
-# ponytail: config/default.yaml is owned by T01; this should become
-# models.shuttle.background_sample_span_s. Until then the first background takes ~10 s.
+# Default for MedianBackground; run() reads models.shuttle.background_sample_span_s.
 BACKGROUND_SAMPLE_SPAN_S = 10.0
 
 
@@ -335,6 +334,7 @@ def run(config: AppConfig) -> None:
             tracker.height,
             int(settings["background_sample_count"]),
             float(settings["background_update_interval_s"]),
+            sample_span_s=float(settings["background_sample_span_s"]),
         ).start()
         worker = ShuttleWorker(
             tracker,
