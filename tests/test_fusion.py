@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -9,7 +10,7 @@ from hud.bus.messages import HeartbeatMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import compute_homography, transform_point
 from hud.fusion.state import FusionState, _min_cost_pairs, validate_game_state
 from hud.server.operator_api import create_operator_app
-from hud.server.ws_server import create_ws_app
+from hud.server.ws_server import create_ws_app, offer_latest
 
 
 def test_homography_maps_reference_corners_within_one_centimeter() -> None:
@@ -542,3 +543,104 @@ def test_eight_detections_fill_four_slots_by_side_and_position(tmp_path) -> None
     assert [p["side"] for p in players] == [0, 0, 1, 1]
     for slot, (x, y) in enumerate(start):
         assert players[slot]["court_xy_m"] == pytest.approx([x + 0.1, y])
+
+
+def _doubles_after_end_change(tmp_path) -> FusionState:
+    # Team 0 now plays from the far side (side 1), team 1 from the near side.
+    state = _square_court_state(tmp_path)
+    state.set_players(
+        [
+            {"id": i, "name": str(i), "color": None, "team": i // 2, "side": 1 - i // 2}
+            for i in range(4)
+        ],
+        mode="doubles",
+    )
+    return state
+
+
+def test_confirm_point_maps_suggested_side_to_team_after_end_change(tmp_path) -> None:
+    state = _doubles_after_end_change(tmp_path)
+    state.suggest_point(10, 0)  # near side won; that is team 1 now
+    state.confirm_point(10, accept=True)
+    state.suggest_point(20, 0, suggested_team=0)  # an explicit team wins over the side
+    state.confirm_point(20, accept=True)
+    assert state.snapshot()["match"]["score"] == [1, 1]
+
+
+def test_shuttle_and_hits_drive_rally_shots_and_point_suggestion(tmp_path) -> None:
+    state = _doubles_after_end_change(tmp_path)
+    feet = [(10.0, 1.0), (10.0, 5.0), (3.0, 1.0), (3.0, 5.0)]
+    state.ingest(
+        PlayersMessage(
+            frame_id=1,
+            ts=1_000_000,
+            players=[{"track_id": 10 + i, **_foot(*xy)} for i, xy in enumerate(feet)],
+        ).to_json()
+    )
+    frame_ns = 16_666_667
+    ts = 1_000_000_000
+    # Player 2 (near) hits it up, player 0 (far) returns it, then it vanishes in the far half.
+    path_y = [50 + 2 * i for i in range(10)] + [66 - 2 * i for i in range(24)]
+    path_y += [22 + 2 * i for i in range(10)]
+    events: list[dict] = []
+    for y in path_y:
+        ts += frame_ns
+        state.ingest(ShuttleMessage(frame_id=2, ts=ts, visible=True, px=[16.0, y]).to_json())
+        events += state.snapshot()["events"]
+    snapshot = state.snapshot()
+    assert snapshot["rally"]["active"] is True
+    assert snapshot["rally"]["shots"] == 2
+    assert [e["data"]["by"] for e in events if e["kind"] == "shot"] == [2, 0]
+    # last_shot is the answered shot (player 2's), whose speed is known once returned.
+    assert snapshot["shuttle"]["last_shot"]["by"] == 2
+    assert snapshot["shuttle"]["landing_xy_m_est"] is None  # still flying
+    for _ in range(130):  # > 1.8 s unseen ends the rally
+        ts += frame_ns
+        state.ingest(ShuttleMessage(frame_id=3, ts=ts, visible=False).to_json())
+        events += state.snapshot()["events"]
+    snapshot = state.snapshot()
+    assert snapshot["shuttle"]["status"] == "lost"
+    assert snapshot["rally"]["active"] is False
+    assert [e["kind"] for e in events] == [
+        "rally_start",
+        "shot",
+        "shot",
+        "rally_end",
+        "point_suggested",
+    ]
+    point = events[-1]
+    # Landed in on the far half (last seen at px y=40 -> x ~ 8 m): side 0, i.e. team 1.
+    assert point["data"]["suggested_side"] == 0 and point["data"]["suggested_team"] == 1
+    assert snapshot["shuttle"]["landing_xy_m_est"] == point["data"]["landing_xy_m_est"]
+    state.confirm_point(point["ts"], accept=True)
+    assert state.snapshot()["match"]["score"] == [None, 1]
+
+
+def test_slow_ws_client_keeps_events_from_dropped_frames() -> None:
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+    point = {"ts": 1, "kind": "point_suggested", "data": {}}
+    shot = {"ts": 2, "kind": "shot", "data": {}}
+    offer_latest(queue, {"ts": 1, "events": [point]})
+    offer_latest(queue, {"ts": 2, "events": [shot]})
+    offer_latest(queue, {"ts": 3, "events": []})
+    assert queue.get_nowait() == {"ts": 3, "events": [point, shot]}
+
+
+def test_fusion_tunables_come_from_config(tmp_path) -> None:
+    state = FusionState(
+        tmp_path / "court_calib.json",
+        fusion={
+            "identity": {"app_window_frames": 5, "side_mismatch_cost": 50},
+            "rally": {"end_gap_ms": 500, "shot_match_window_ms": 80},
+            "shuttle": {"max_px_per_s": 3000},
+        },
+    )
+    assert (state._app_window_frames, state._app_weight_m, state._side_mismatch_cost) == (
+        5,
+        2.0,
+        50,
+    )
+    assert state._fsm.end_gap_ns == 500_000_000
+    assert state._shots.match_window_ns == 80_000_000 and state._shots.refractory_ns == 200_000_000
+    assert state._kf.max_px_per_s == 3000
+    assert FusionState(tmp_path / "c.json", fusion={"shuttle": None})._kf.max_px_per_s is None

@@ -10,6 +10,29 @@ from typing import Any
 
 from hud.fusion.state import FusionState
 
+# ponytail: a client stalled this many events behind loses the oldest ones; raise if seen.
+_MAX_CARRIED_EVENTS = 256
+
+
+def offer_latest(queue: asyncio.Queue[dict[str, Any]], snapshot: dict[str, Any]) -> None:
+    """Replace an unsent snapshot with the newest one, carrying its unsent events forward.
+
+    Events are drained once per snapshot for all clients, so dropping a stale frame must
+    not drop its events (e.g. a `point_suggested` the operator still has to confirm).
+    """
+    if queue.full():
+        try:
+            missed = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            missed = None
+        if missed is not None and missed["events"]:
+            events = (missed["events"] + snapshot["events"])[-_MAX_CARRIED_EVENTS:]
+            snapshot = {**snapshot, "events": events}
+    try:
+        queue.put_nowait(snapshot)
+    except asyncio.QueueFull:
+        pass
+
 
 def create_ws_app(state: FusionState) -> Any:
     try:
@@ -18,21 +41,13 @@ def create_ws_app(state: FusionState) -> Any:
         raise RuntimeError("Install FastAPI and Uvicorn to run the WebSocket server") from exc
 
     globals()["WebSocket"] = WebSocket
-    clients: set[asyncio.Queue[str]] = set()
+    clients: set[asyncio.Queue[dict[str, Any]]] = set()
 
     async def broadcast() -> None:
         while True:
-            payload = json.dumps(state.snapshot(), separators=(",", ":"))
+            snapshot = state.snapshot()
             for queue in tuple(clients):
-                if queue.full():
-                    try:
-                        queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                try:
-                    queue.put_nowait(payload)
-                except asyncio.QueueFull:
-                    pass
+                offer_latest(queue, snapshot)
             await asyncio.sleep(1 / 30)
 
     @asynccontextmanager
@@ -48,12 +63,13 @@ def create_ws_app(state: FusionState) -> Any:
     @app.websocket("/")
     async def stream(websocket: WebSocket) -> None:
         await websocket.accept()
-        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1)
         clients.add(queue)
 
         async def send_latest() -> None:
             while True:
-                await websocket.send_text(await queue.get())
+                snapshot = await queue.get()
+                await websocket.send_text(json.dumps(snapshot, separators=(",", ":")))
 
         sender = asyncio.create_task(send_latest())
         try:
