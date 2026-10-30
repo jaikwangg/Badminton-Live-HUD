@@ -16,6 +16,8 @@
   let corners = [];
   let dragging = -1;
   let pendingPoint = null;
+  // Fusion may re-send a suggestion with the same ts to correct it; once answered, ignore those.
+  const answeredPoints = new Set();
   let roster = [];
   let rosterKey = "";
 
@@ -234,6 +236,7 @@
 
   $("#reset-rally").addEventListener("click", async () => {
     if (await act("#control-status", "เริ่มแรลลี่ใหม่แล้ว", "/api/rally/reset")) {
+      if (pendingPoint) answeredPoints.add(pendingPoint.ts);
       pendingPoint = null;
       $("#point-suggestion").hidden = true;
     }
@@ -242,6 +245,8 @@
   async function decidePoint(accept) {
     if (!pendingPoint) return;
     const label = accept ? "ยืนยันแต้มแล้ว" : "ปฏิเสธแต้มแล้ว";
+    // Marked before the request so a correction arriving mid-request can't re-show it.
+    answeredPoints.add(pendingPoint.ts);
     // A 422 means the server no longer holds this suggestion (e.g. rally reset), so drop it too.
     await act("#control-status", label, "/api/point/confirm", { event_ts: pendingPoint.ts, accept });
     pendingPoint = null;
@@ -306,7 +311,10 @@
         return badge;
       }),
     );
-    const suggestion = (state.events || []).findLast((item) => item.kind === "point_suggested");
+    // Keyed by ts: a later event with the same ts replaces the shown one rather than adding another.
+    const suggestion = (state.events || []).findLast(
+      (item) => item.kind === "point_suggested" && !answeredPoints.has(item.ts),
+    );
     if (suggestion) {
       const team = suggestion.data?.suggested_team ?? suggestion.data?.suggested_side;
       pendingPoint = { ts: suggestion.ts };
