@@ -48,3 +48,17 @@ def test_heartbeat_is_printed_for_supervisor(capsys) -> None:
     worker.process(7, 1234, 200, 100, bytes(200 * 100 * 3))
     line = capsys.readouterr().out.strip()
     assert json.loads(line)["worker"] == "players"
+
+
+def test_worker_forwards_four_tracked_players() -> None:
+    class FourPlayerDetector:
+        def infer(self, img: object) -> list[Det]:
+            assert img.shape == (100, 200, 3)
+            return [Det([10 * i, 10, 10 * i + 8, 80], 0.9, i) for i in range(4)]
+
+    publisher = FakePublisher()
+    worker = PlayersWorker(FourPlayerDetector(), publisher)
+    worker.process(12, 5678, 200, 100, bytes(200 * 100 * 3))
+
+    message = PlayersMessage.from_json(publisher.messages[0])
+    assert [player.track_id for player in message.players] == [0, 1, 2, 3]
