@@ -35,6 +35,7 @@ sha256sum -c source_IMG_5341.mov.sha256
 | `hud_16x9_1080p.mp4` | 27 MB | **ผลลัพธ์** HUD แบบจอถ่ายทอดสด 1920×1080 | — |
 | `hud_9x16_vertical.mp4` | 22 MB | **ผลลัพธ์** HUD แนวตั้ง 1080×1920 | — |
 | `raw_detections.zip` | 1.9 MB | ผลตรวจจับดิบจาก YOLO หลายขนาด/ความละเอียด และ log | เทียบโมเดล |
+| `data/dets2.json` | 8.3 MB | ผลตรวจจับทุกเฟรม: bbox, keypoints 17 จุด, ตำแหน่งบนคอร์ท, track id, ค่าสี (ผลของ `pipeline/color2.py`) | `pipeline/identify.py` วางเป็น `data/dets2.json` |
 | `debug_frames.zip` | 28 MB | ภาพที่ใช้ตรวจด้วยตาระหว่างทำ (contact sheet, เฟรมพื้นหลัง) | ดีบัก |
 
 ## Stage 2: doubles-v2 (`stage2-doubles-v2/`)
@@ -50,6 +51,8 @@ sha256sum -c source_IMG_5341.mov.sha256
 | `hud_v3_statui.mp4` | 40 MB | **ผลลัพธ์ล่าสุด** HUD แบบ stat UI (ไม่มีพลังกาย) | — |
 | `hud_v2_panels.mp4` | 47 MB | ผลลัพธ์รุ่นก่อน: แผงซ้อนในวิดีโอ มีพลังกายบนหัว | เทียบ |
 | `raw_logs.zip` | 0.7 MB | ผลตรวจจับดิบก่อนแยกตัวตน (`dets.jsonl`), homography ก่อน refine และ log ทุกขั้น | ดีบัก |
+| `data/dets2.jsonl` | 8.3 MB | ผลตรวจจับทุกเฟรมพร้อมสีหน้าอกที่คำนวณใหม่ (ผลของ `chest2.py`) | `players.py`, `shuttle_track.py` วางเป็น `data/dets2.jsonl` |
+| `data/cands.json` | 8.1 MB | จุดที่อาจเป็นลูกขนไก่ในแต่ละเฟรม (ผลของ `shuttle_cands.py`) | `shuttle_track.py` วางเป็น `data/cands.json` |
 | `debug_frames.zip` | 68 MB | ภาพตรวจทีละเฟรม: แถบภาพลูก, ภาพตอนตี, preview HUD | ดีบัก |
 
 ## ไม่ได้เก็บ
