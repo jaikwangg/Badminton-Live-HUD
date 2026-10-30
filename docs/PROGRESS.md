@@ -7,9 +7,9 @@
 | 0 | 2026-10-28 – 29 | `design/mockup-v0/`, `docs/`, `tasks/` (`main`) | mockup HUD + หน้า operator, spec ระบบเรียลไทม์ | เสร็จ |
 | 1 | 2026-10-29 | `prototype/offline-v0/` | ตามผู้เล่น 4 คนจากคลิปจริง, HUD เว็บ + MP4 16:9 และ 9:16 | เสร็จ (prototype) |
 | 2 | 2026-10-29 – 30 | `prototype/doubles-v2/` | เพิ่มคาลิเบรตอัตโนมัติ, ชดเชยกล้องขยับ, ตามลูก, ช็อต, ความเร็วลูก, HUD 1080×1920 | เสร็จ (prototype) |
-| 3 | 2026-10-29 – | `src/hud/` ตาม `tasks/T01–T11` | ระบบเรียลไทม์จริง | กำลังทำ: PR #1–#7 (T01–T06, T10), #9 และ #10–#12 (spec ประเภทคู่) ยังเปิดอยู่ |
+| 3 | 2026-10-29 – | `src/hud/` ตาม `tasks/T01–T11` | ระบบเรียลไทม์จริง | กำลังทำ: T01–T10 merge เข้า `main` แล้ว เหลือ T11 ยังไม่ได้รันกับคลิปจริงหรือ GPU (ดู "Stage 3: สถานะ") |
 
-stage 0–2 เป็นงาน**ประมวลผลหลังถ่าย**บน CPU ส่วน stage 3 ยังไม่ได้ merge เข้า `main`
+stage 0–2 เป็นงาน**ประมวลผลหลังถ่าย**บน CPU ส่วน stage 3 เป็นโค้ดเรียลไทม์บน `main` ที่ผ่านแค่ unit test
 
 วิดีโอ เสียง และภาพดีบักของ stage 1–2 อยู่ใน branch [`media`](https://github.com/jaikwangg/Badminton-Live-HUD/tree/media) (วิธีดึงดูใน README ของ branch นั้น)
 
@@ -90,6 +90,42 @@ stage 0–2 เป็นงาน**ประมวลผลหลังถ่า
 - `hud/v3_statui.jpg`, `hud/v2_panels.jpg`: preview HUD
 
 **วิดีโอ:** [`media/stage2-doubles-v2`](https://github.com/jaikwangg/Badminton-Live-HUD/tree/media/stage2-doubles-v2) (`hud_v3_statui.mp4` คือตัวล่าสุด)
+
+## Stage 3: สถานะ (2026-10-30)
+
+ตอนนี้ไม่ใช้ Codex และ Antigravity แล้ว Claude กับ subagent รับทุกการ์ด
+
+**merge เข้า `main` แล้ว**
+
+| การ์ด | PR |
+|---|---|
+| T01 โครง + frame bus | #1, #15, #18, #23, #27, #31 |
+| T02 แหล่งวิดีโอ | #2 |
+| T03 ผู้เล่น | #3, #22 |
+| T04 fusion + server | #4, #21, #24, #30 |
+| T05 overlay | #5, #19 |
+| T06 TrackNetV3 | #6, #9 |
+| T07 เสียงตี | #20 |
+| T08 rally + ความเร็วลูก | #14, #28 |
+| T09 หน้า operator | #25, #29 |
+| T10 recorder | #7 |
+| T11 benchmark + soak | กำลังทำ (ยังไม่มี `tools/benchmark.py` บน `main`) |
+
+**ผ่านอะไรแล้ว และยังไม่ผ่านอะไร**
+- ทุกการ์ดผ่าน `pytest` และ `ruff` ด้วยข้อมูลปลอม (message ปลอม, เฟรมสังเคราะห์)
+- **ยังไม่เคยรันทั้งระบบกับคลิปจริงหรือกล้องจริง** และยังไม่มีตัวเลข fps หรือ latency จาก GPU (PR ที่แตะ hot path เขียนไว้ว่า "needs GPU benchmark")
+- ความเร็วลูกเปลี่ยนเป็นสูตรแรงต้านอากาศแล้ว (#28, ดู T08) แต่ยังไม่ได้เทียบกับคลิป
+
+**ตัดสินแล้ว**
+- ประเภทคู่อยู่ใน scope: #11 (goals), #10 (contract), #12 (กติกาและการ์ด), #17 (จุดเริ่มพิกัดคอร์ทคือมุมใกล้ซ้ายเมื่อมองจากกล้อง)
+- Linux: reader ห้ามลบ shared memory ของ frame ring ตอนออก (#31) ไม่งั้น restart worker ตัวเดียวแล้ว bus ตายทั้งระบบ ทดสอบใน Docker แล้ว
+
+**ยังค้าง**
+1. T11: benchmark บน GPU และ soak test
+2. ตรวจความแม่นกับคลิปจริง: ID สลับ (เป้าใน GOALS: ไม่เกิน 2 ครั้งต่อนาที) และจำนวนช็อตเทียบกับ 45 ช็อตของ stage 2
+3. G7: ให้คนที่ไม่ใช่ dev ลองคาลิเบรต แล้วจับเวลา (เป้า ≤60 วิ)
+4. หน้า operator ที่ต่อเข้ามาหลังส่ง `point_suggested` ไปแล้วจะไม่เห็นคำแนะนำนั้น ต้องตัดสินเรื่อง contract ก่อน (เช่น เพิ่มฟิลด์ pending suggestions)
+5. ความหมายของการ reset rally (ตอนไหน reset, reset อะไรบ้าง) ยังไม่ได้ตกลง
 
 ---
 
