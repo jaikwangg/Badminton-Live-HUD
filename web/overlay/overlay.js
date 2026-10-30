@@ -9,13 +9,13 @@
   const lostBanner = document.getElementById("signal-lost");
   const markerLayer = document.getElementById("player-markers");
   const shuttleMarker = document.getElementById("shuttle-marker");
-  const markers = [0, 1].map((id) => {
-    const element = document.createElement("div");
-    element.className = `player-marker ${id === 0 ? "cyan" : "violet"}`;
-    element.dataset.tracked = "false";
-    markerLayer.append(element);
-    return element;
-  });
+  const courtPlayers = document.getElementById("court-players");
+  const cardTemplate = document.getElementById("player-card-template");
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const TEAM_COLORS = ["#39e4f5", "#b693ff"];
+  // Per-player DOM (card, foot marker, court dot), rebuilt only when the roster changes.
+  let views = new Map();
+  let rosterKey = "";
   let previousState = null;
   let targetState = null;
   let receivedAt = 0;
@@ -81,44 +81,69 @@
     return Number(from) + (Number(to) - Number(from)) * amount;
   }
 
-  function renderPlayer(player, oldPlayer, amount, index) {
-    const card = document.getElementById(`player-card-${index}`);
-    const name = document.getElementById(`player-name-${index}`);
-    const speed = document.getElementById(`player-speed-${index}`);
-    const distance = document.getElementById(`player-distance-${index}`);
-    const marker = markers[index];
-    const imgPoint = interpolatePoint(oldPlayer?.img_xy, player?.img_xy, amount);
-    const courtPoint = interpolatePoint(oldPlayer?.court_xy_m, player?.court_xy_m, amount);
-    const speedValue = interpolateNumber(oldPlayer?.speed_mps, player?.speed_mps, amount);
-    const distValue = interpolateNumber(oldPlayer?.dist_m, player?.dist_m, amount);
-    const isTracked = Boolean(player?.tracked);
-    const playerColor = typeof player?.color === "string" && /^#[\da-f]{6}$/i.test(player.color)
-      ? player.color
-      : index === 0 ? "#39e4f5" : "#b693ff";
+  const teamOf = (player) => (player?.team === 1 ? 1 : 0);
 
-    name.textContent = player?.name || `PLAYER ${index + 1}`;
-    speed.textContent = format(speedValue);
-    distance.textContent = format(distValue);
-    card.dataset.tracked = String(isTracked);
-    card.style.setProperty("--player-color", playerColor);
-    marker.dataset.tracked = String(isTracked);
-    marker.style.setProperty("--player-color", playerColor);
+  function syncRoster(players) {
+    const key = players.map((player) => `${player.id}:${teamOf(player)}`).join(",");
+    if (key === rosterKey) return;
+    rosterKey = key;
+    views.forEach((view) => {
+      view.card.remove();
+      view.marker.remove();
+      view.dot.remove();
+    });
+    views = new Map();
+    players.forEach((player, index) => {
+      const team = teamOf(player);
+      const card = cardTemplate.content.firstElementChild.cloneNode(true);
+      card.querySelector(".player-number").textContent = String(Number(player.id) + 1).padStart(2, "0");
+      document.getElementById(`team-cards-${team}`).append(card);
+      const marker = document.createElement("div");
+      marker.className = "player-marker";
+      markerLayer.append(marker);
+      const dot = document.createElementNS(SVG_NS, "circle");
+      dot.setAttribute("class", "court-player");
+      dot.setAttribute("r", "7");
+      courtPlayers.append(dot);
+      views.set(player.id ?? index, {
+        card,
+        marker,
+        dot,
+        name: card.querySelector(".player-name"),
+        speed: card.querySelector(".player-speed"),
+        distance: card.querySelector(".player-distance"),
+      });
+    });
+  }
+
+  function placeOnCourt(element, point) {
+    element.style.display = point ? "block" : "none";
+    if (point) element.setAttribute("transform", `translate(${1 + (point[0] / 13.4) * 400} ${1 + (point[1] / 6.1) * 182})`);
+  }
+
+  function renderPlayer(player, oldPlayer, amount, view) {
+    const imgPoint = interpolatePoint(oldPlayer?.img_xy, player.img_xy, amount);
+    const courtPoint = interpolatePoint(oldPlayer?.court_xy_m, player.court_xy_m, amount);
+    const isTracked = String(player.tracked === true);
+    const playerColor = typeof player.color === "string" && /^#[\da-f]{6}$/i.test(player.color)
+      ? player.color
+      : TEAM_COLORS[teamOf(player)];
+
+    view.name.textContent = player.name || `PLAYER ${Number(player.id) + 1}`;
+    view.speed.textContent = format(interpolateNumber(oldPlayer?.speed_mps, player.speed_mps, amount));
+    view.distance.textContent = format(interpolateNumber(oldPlayer?.dist_m, player.dist_m, amount));
+    for (const element of [view.card, view.marker, view.dot]) {
+      element.dataset.tracked = isTracked;
+      element.style.setProperty("--player-color", playerColor);
+    }
     if (imgPoint) {
-      marker.style.display = "block";
-      marker.style.left = `${Math.max(0, Math.min(100, (imgPoint[0] / FRAME_WIDTH) * 100))}vw`;
-      marker.style.top = `${Math.max(0, Math.min(100, (imgPoint[1] / FRAME_HEIGHT) * 100))}vh`;
+      view.marker.style.display = "block";
+      view.marker.style.left = `${Math.max(0, Math.min(100, (imgPoint[0] / FRAME_WIDTH) * 100))}vw`;
+      view.marker.style.top = `${Math.max(0, Math.min(100, (imgPoint[1] / FRAME_HEIGHT) * 100))}vh`;
     } else {
-      marker.style.display = "none";
+      view.marker.style.display = "none";
     }
-    const courtDot = document.getElementById(`court-player-${index}`);
-    courtDot.style.fill = playerColor;
-    if (courtPoint) {
-      courtDot.style.display = "block";
-      courtDot.setAttribute("cx", String(1 + (courtPoint[0] / 13.4) * 400));
-      courtDot.setAttribute("cy", String(1 + (courtPoint[1] / 6.1) * 182));
-    } else {
-      courtDot.style.display = "none";
-    }
+    placeOnCourt(view.dot, courtPoint);
   }
 
   function render() {
@@ -137,12 +162,16 @@
       document.getElementById("games-line").textContent = `GAMES ${games[0] ?? "—"} : ${games[1] ?? "—"}`;
       const lastShot = targetState.shuttle?.last_shot;
       document.getElementById("shot-speed").textContent = format(lastShot?.speed_kmh_est, 0);
-      targetState.players.slice(0, 2).forEach((player, index) => {
-        renderPlayer(player, prior.players?.[index], amount, index);
+      const mode = targetState.match.mode === "doubles" ? "doubles" : "singles";
+      document.querySelector(".hud").dataset.mode = mode;
+      document.getElementById("mode-label").textContent = mode.toUpperCase();
+      const players = targetState.players.filter((player) => player && typeof player === "object");
+      syncRoster(players);
+      players.forEach((player, index) => {
+        const id = player.id ?? index;
+        const oldPlayer = prior.players?.find((candidate) => candidate?.id === player.id);
+        renderPlayer(player, oldPlayer, amount, views.get(id));
       });
-      for (let index = targetState.players.length; index < 2; index += 1) {
-        renderPlayer(null, null, amount, index);
-      }
 
       const shuttle = targetState.shuttle || {};
       const oldShuttle = prior.shuttle || shuttle;
@@ -156,15 +185,9 @@
       } else {
         shuttleMarker.style.display = "none";
       }
-      const shuttleCourt = interpolatePoint(oldShuttle.court_xy_m, shuttle.court_xy_m, amount);
-      const courtShuttle = document.getElementById("court-shuttle");
-      if (shuttleCourt && shuttle.status !== "lost") {
-        courtShuttle.style.display = "block";
-        courtShuttle.setAttribute("cx", String(1 + (shuttleCourt[0] / 13.4) * 400));
-        courtShuttle.setAttribute("cy", String(1 + (shuttleCourt[1] / 6.1) * 182));
-      } else {
-        courtShuttle.style.display = "none";
-      }
+      // Court map shows only the estimated landing spot, never the shuttle in flight (CONTRACTS).
+      const landing = shuttle.landing_xy_m_est;
+      placeOnCourt(document.getElementById("court-shuttle"), Array.isArray(landing) && landing.length >= 2 ? landing : null);
     }
     window.requestAnimationFrame(render);
   }

@@ -41,25 +41,27 @@ body { color: var(--white); font-family: Inter, Arial, sans-serif; }
 .player-markers { position: absolute; z-index: 2; inset: 0; pointer-events: none; }
 .player-marker { position: absolute; width: 38px; height: 12px; border: 2px solid var(--player-color, var(--cyan)); border-radius: 50%; filter: drop-shadow(0 0 8px var(--player-color, var(--cyan))); transform: translate(-50%, -50%); transition: left .045s linear, top .045s linear; }
 .player-marker::before { content: ''; position: absolute; left: 50%; bottom: 6px; width: 19px; height: 35px; border: 1px solid currentColor; border-bottom: 0; border-radius: 50% 50% 0 0; opacity: .65; transform: translateX(-50%); }
-.player-marker.violet { --player-color: var(--violet); }
-.player-marker.cyan { --player-color: var(--cyan); }
 .player-marker[data-tracked="false"] { opacity: .25; }
 .shuttle-marker { position: absolute; z-index: 3; display: none; width: 14px; height: 14px; border-radius: 50%; background: #fff7bf; box-shadow: 0 0 8px 3px rgba(255,239,132,.72); transform: translate(-50%, -50%); }
 .shuttle-marker[data-status="predicted"] { opacity: .38; }
 .shuttle-marker span { position: absolute; inset: -8px; border: 1px solid rgba(255,239,132,.6); border-radius: 50%; }
 .bottom-row { position: absolute; z-index: 4; right: 4.2%; bottom: 4.4%; left: 4.2%; display: grid; grid-template-columns: 1fr minmax(240px, 30%) 1fr; align-items: end; gap: 16px; }
 .player-card { position: relative; min-height: 112px; padding: 15px 18px 14px; border-radius: 7px; overflow: hidden; }
-.player-card.right { text-align: right; }
+.team-cards { display: grid; gap: 10px; }
+.player-card[data-tracked="false"] { opacity: .45; }
+.hud[data-mode="doubles"] .player-card { min-height: 0; padding: 10px 16px; }
+.hud[data-mode="doubles"] .player-metrics { margin-top: 8px; }
+.team-cards.right .player-card { text-align: right; }
 .player-accent { position: absolute; top: 0; bottom: 0; left: 0; width: 2px; background: var(--player-color, var(--cyan)); box-shadow: 0 0 12px currentColor; }
-.player-card.right .player-accent { right: 0; left: auto; }
+.team-cards.right .player-accent { right: 0; left: auto; }
 .player-heading { display: flex; align-items: center; gap: 8px; color: var(--muted); }
-.player-card.right .player-heading { flex-direction: row-reverse; }
+.team-cards.right .player-heading { flex-direction: row-reverse; }
 .player-number { color: var(--player-color, var(--cyan)); font: 700 14px 'Barlow Condensed', sans-serif; }
 .player-name { overflow: hidden; color: var(--white); font: 700 17px 'Barlow Condensed', sans-serif; letter-spacing: .09em; text-overflow: ellipsis; white-space: nowrap; }
 .tracked-dot { width: 6px; height: 6px; border-radius: 50%; background: #55636e; }
 .player-card[data-tracked="true"] .tracked-dot { background: #5ff0a9; box-shadow: 0 0 9px #5ff0a9; }
 .player-metrics { display: flex; gap: 27px; margin-top: 15px; }
-.player-card.right .player-metrics { justify-content: flex-end; }
+.team-cards.right .player-metrics { justify-content: flex-end; }
 .player-metrics div { display: flex; align-items: baseline; gap: 7px; }
 .player-metrics strong { font: 700 24px/.9 'Barlow Condensed', sans-serif; }
 .player-metrics span { color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: .12em; }
@@ -71,10 +73,10 @@ body { color: var(--white); font-family: Inter, Arial, sans-serif; }
 .court line { stroke: rgba(175,224,222,.62); stroke-width: 1; }
 .court .court-outline { fill: rgba(29,92,89,.32); stroke: rgba(175,224,222,.75); stroke-width: 1.4; }
 .court .net { stroke: rgba(255,255,255,.55); stroke-dasharray: 3 3; }
-.court-player { display: none; stroke: rgba(255,255,255,.9); stroke-width: 1.5; }
-.court-player.cyan { fill: var(--cyan); }
-.court-player.violet { fill: var(--violet); }
+.court-player { display: none; fill: var(--player-color, var(--cyan)); stroke: rgba(255,255,255,.9); stroke-width: 1.5; }
+.court-player[data-tracked="false"] { opacity: .35; }
 .court-shuttle { display: none; fill: #fff79a; filter: drop-shadow(0 0 4px #fff79a); }
+.court-shuttle text { fill: #f1ba61; font: 700 10px Inter, sans-serif; filter: none; }
 .signal-lost { position: absolute; z-index: 10; top: 50%; left: 50%; display: flex; align-items: center; gap: 10px; padding: 13px 17px; border: 1px solid rgba(255,116,125,.5); border-radius: 6px; background: rgba(9,15,23,.9); color: #ff9299; font-size: 11px; font-weight: 800; letter-spacing: .16em; transform: translate(-50%, -50%); }
 .signal-lost[hidden] { display: none; }
 .signal-lost span { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: #ff747d; color: #111; }
