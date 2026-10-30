@@ -3,7 +3,8 @@
 According to CONTRACTS and T08:
 - Shots are counted by matching audio hit and visual direction change within <= 100ms.
 - If audio is degraded or unavailable, shots are counted purely from visual direction change.
-- Shuttlecock speed (speed_kmh_est) is calculated over the first 3-5 frames after a stroke.
+- Shuttle speed (speed_kmh_est) uses the drag model of LESSONS 7 between a shot and its
+  return, so a shot's speed is known only once the next shot happens.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ class ShotInfo:
     speed_kmh_est: float | None
     type: str | None = None
     court_xy_m: list[float] | None = None
+    hitter_xy_m: list[float] | None = None  # hitter's court position at the hit
     side: int | None = None  # court side of the hitter, used to force alternation
     team: int | None = None
     evidence: float = 0.0  # 0 = vision only, 1 + strength = vision matched with audio
@@ -34,62 +36,35 @@ class _DirectionChange:
     players: list[dict[str, Any]] | None
 
 
-class SpeedEstimator:
-    """Estimate shuttlecock launch speed from court coordinates across 3-5 consecutive frames."""
+# ponytail: speed guards are module constants; move them into config when T01 owns them.
+GRAVITY_MPS2 = 9.81
+SHUTTLE_TERMINAL_MPS = 6.8
+DRAG_K_PER_M = GRAVITY_MPS2 / SHUTTLE_TERMINAL_MPS**2
+# T under 0.4 s gives absurd values (LESSONS 7: 0.30 s -> 325 km/h); over 3 s is not one flight.
+SPEED_MIN_DT_S = 0.4
+SPEED_MAX_DT_S = 3.0
+# Shots closer than 3 m (net play) have no usable estimate (LESSONS 7).
+SPEED_MIN_DIST_M = 3.0
 
-    def __init__(self, min_frames: int = 3, max_frames: int = 5) -> None:
-        self.min_frames = min_frames
-        self.max_frames = max_frames
-        self._samples: list[tuple[int, float, float]] = []
-        self._active = False
 
-    def start_sampling(self, ts: int, court_xy: list[float] | tuple[float, float]) -> None:
-        """Begin collecting court positions following a confirmed stroke."""
-        self._samples = [(ts, float(court_xy[0]), float(court_xy[1]))]
-        self._active = True
+def drag_speed_kmh_est(
+    hitter_xy_m: list[float] | None, returner_xy_m: list[float] | None, dt_ns: int
+) -> float | None:
+    """Launch speed v0 = (e^(kD) - 1) / (kT) of a shot, from the hitter and returner.
 
-    def add_sample(
-        self, ts: int, court_xy: list[float] | tuple[float, float] | None
-    ) -> float | None:
-        """Add a post-stroke court sample and compute speed once 3-5 frames are gathered."""
-        if not self._active or court_xy is None:
-            return None
-
-        self._samples.append((ts, float(court_xy[0]), float(court_xy[1])))
-
-        if len(self._samples) >= self.max_frames:
-            speed = self._calculate_speed()
-            self._active = False
-            return speed
-
+    D is the court ground distance between the two players and T the time between the
+    two shots. Returns None when a position is unknown or D/T is outside sane bounds.
+    """
+    if hitter_xy_m is None or returner_xy_m is None:
         return None
-
-    def finalize(self) -> float | None:
-        """Force speed calculation if at least min_frames were recorded."""
-        if not self._active:
-            return None
-        self._active = False
-        if len(self._samples) >= self.min_frames:
-            return self._calculate_speed()
+    dt_s = dt_ns / 1_000_000_000.0
+    if not SPEED_MIN_DT_S <= dt_s <= SPEED_MAX_DT_S:
         return None
-
-    def _calculate_speed(self) -> float | None:
-        if len(self._samples) < self.min_frames:
-            return None
-
-        total_distance = 0.0
-        for i in range(len(self._samples) - 1):
-            _, x1, y1 = self._samples[i]
-            _, x2, y2 = self._samples[i + 1]
-            total_distance += math.hypot(x2 - x1, y2 - y1)
-
-        dt = (self._samples[-1][0] - self._samples[0][0]) / 1_000_000_000.0
-        if dt <= 0.0 or total_distance <= 0.0:
-            return None
-
-        speed_mps = total_distance / dt
-        speed_kmh = speed_mps * 3.6
-        return round(speed_kmh, 1)
+    dist_m = math.hypot(returner_xy_m[0] - hitter_xy_m[0], returner_xy_m[1] - hitter_xy_m[1])
+    if dist_m < SPEED_MIN_DIST_M:
+        return None
+    v0_mps = math.expm1(DRAG_K_PER_M * dist_m) / (DRAG_K_PER_M * dt_s)
+    return round(v0_mps * 3.6, 1)
 
 
 class ShotDetector:
@@ -107,14 +82,12 @@ class ShotDetector:
         self._recent_dir_changes: deque[_DirectionChange] = deque(maxlen=16)
 
         self._last_shot_ts: int = -self.refractory_ns
-        self.speed_estimator = SpeedEstimator(min_frames=3, max_frames=5)
         self.last_shot: ShotInfo | None = None
 
     def reset(self) -> None:
         self._recent_hits.clear()
         self._recent_dir_changes.clear()
         self._last_shot_ts = -self.refractory_ns
-        self.speed_estimator = SpeedEstimator(min_frames=3, max_frames=5)
         self.last_shot = None
 
     def register_audio_hit(self, ts: int, strength: float = 0.5) -> ShotInfo | None:
@@ -196,24 +169,15 @@ class ShotDetector:
         self._last_shot_ts = shot_ts
         hitter = self.attribute_player(change.px, change.players)
 
-        if change.court_xy is not None:
-            self.speed_estimator.start_sampling(shot_ts, change.court_xy)
-
         shot = ShotInfo(
             ts=shot_ts,
             by=int(hitter["id"]) if hitter else None,
             speed_kmh_est=None,
             court_xy_m=change.court_xy,
+            hitter_xy_m=hitter.get("court_xy_m") if hitter else None,
             side=hitter.get("side") if hitter else None,
             team=hitter.get("team") if hitter else None,
             evidence=evidence,
         )
         self.last_shot = shot
         return shot
-
-    def update_post_shot_court_sample(self, ts: int, court_xy: list[float] | None) -> float | None:
-        """Forward post-shot shuttlecourt positions to speed estimator."""
-        speed = self.speed_estimator.add_sample(ts, court_xy)
-        if speed is not None and self.last_shot is not None:
-            self.last_shot.speed_kmh_est = speed
-        return speed

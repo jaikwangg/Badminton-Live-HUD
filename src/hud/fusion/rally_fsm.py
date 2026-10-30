@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import Any
 
 from hud.fusion.homography import transform_point
-from hud.fusion.stats import ShotInfo
+from hud.fusion.stats import ShotInfo, drag_speed_kmh_est
 
 
 class RallyState(StrEnum):
@@ -56,6 +56,8 @@ class RallyFSM:
         self.last_seen_px: list[float] | None = None
         self.last_seen_ts: int = 0
         self.last_shot: ShotInfo | None = None
+        # The shot last_shot answered; its speed_kmh_est is known now that it was returned.
+        self.prev_shot: ShotInfo | None = None
         # Contract: set only once the rally has ended, null otherwise.
         self.landing_xy_m_est: list[float] | None = None
 
@@ -92,6 +94,7 @@ class RallyFSM:
             self.last_seen_px = None
             self.last_seen_ts = ts
             self.last_shot = None
+            self.prev_shot = None
             self.landing_xy_m_est = None
             self._pending_events.append(
                 {"ts": ts, "kind": "rally_start", "data": {"n": self.rally_n}}
@@ -109,6 +112,9 @@ class RallyFSM:
         Two consecutive shots from the same side mean one is spurious: keep the one
         with stronger evidence (audio-matched beats vision-only, then audio strength).
         Only past shots are compared, so this stays realtime.
+
+        A shot's speed needs its return (LESSONS 7), so each accepted shot fills in
+        ``speed_kmh_est`` of the shot it answers and reports it as ``prev_speed_kmh_est``.
         """
         if not self.is_active:
             self.start_serve(shot.ts)
@@ -122,7 +128,15 @@ class RallyFSM:
             replaces = prev.ts
         else:
             self.shots_count += 1
+            self.prev_shot = prev
         self.last_shot = shot
+
+        answered = self.prev_shot
+        if answered is not None:
+            # Recomputed on replacement, so a spurious return never keeps its speed.
+            answered.speed_kmh_est = drag_speed_kmh_est(
+                answered.hitter_xy_m, shot.hitter_xy_m, shot.ts - answered.ts
+            )
 
         data: dict[str, Any] = {
             "by": shot.by,
@@ -131,6 +145,9 @@ class RallyFSM:
         }
         if replaces is not None:
             data["replaces_ts"] = replaces
+        if answered is not None:
+            data["prev_ts"] = answered.ts
+            data["prev_speed_kmh_est"] = answered.speed_kmh_est
         self._pending_events.append({"ts": shot.ts, "kind": "shot", "data": data})
 
     def on_shuttle_update(self, status: str, img_xy: list[float] | None, ts: int) -> None:
@@ -182,6 +199,7 @@ class RallyFSM:
         self.shots_count = 0
         self.last_seen_px = None
         self.last_shot = None
+        self.prev_shot = None
         self.landing_xy_m_est = None
 
     def _landing_court_xy(self) -> list[float] | None:

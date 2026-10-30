@@ -6,7 +6,7 @@ import pytest
 
 from hud.fusion.kalman import ShuttleKalmanFilter
 from hud.fusion.rally_fsm import RallyFSM, RallyState
-from hud.fusion.stats import ShotDetector, ShotInfo, SpeedEstimator
+from hud.fusion.stats import ShotDetector, ShotInfo, drag_speed_kmh_est
 
 # ============================================================================
 # 1. Kalman Filter Tests
@@ -89,7 +89,7 @@ def test_kalman_detects_direction_change_on_reversal() -> None:
 
 
 # ============================================================================
-# 2. Shot Detector and Speed Estimator Tests
+# 2. Shot Detector and Shot Speed Tests
 # ============================================================================
 
 
@@ -135,28 +135,63 @@ def test_shot_detector_degraded_mode_counts_shot_from_vision_alone() -> None:
     assert shot.court_xy_m == [6.0, 2.5]
 
 
-def test_speed_estimator_calculates_speed_over_3_to_5_frames() -> None:
-    estimator = SpeedEstimator(min_frames=3, max_frames=5)
-    ts = 1_000_000_000
-    dt_ns = 20_000_000  # 50 fps -> 20ms per frame
+def test_drag_speed_matches_hand_computed_values() -> None:
+    # k = 9.81 / 6.8^2 = 0.212154; v0 = (e^(kD) - 1) / (kT)
+    # D=10 m, T=1 s: (e^2.12154 - 1) / 0.212154 = 7.34397 / 0.212154 = 34.616 m/s = 124.6 km/h
+    assert drag_speed_kmh_est([1.0, 3.0], [11.0, 3.0], 1_000_000_000) == pytest.approx(124.6)
+    # D=6 m (3-4-5 x2), T=0.5 s: (e^1.272924 - 1) / 0.106077 = 24.240 m/s = 87.3 km/h
+    assert drag_speed_kmh_est([0.0, 0.0], [3.6, 4.8], 500_000_000) == pytest.approx(87.3)
 
-    # Moving 1.0 meter per 20ms -> 50 m/s = 180 km/h
-    estimator.start_sampling(ts, [2.0, 2.0])
 
-    s2 = estimator.add_sample(ts + 1 * dt_ns, [3.0, 2.0])
-    assert s2 is None  # 2 frames gathered (needs at least 3)
+def test_drag_speed_is_null_when_unknown_or_implausible() -> None:
+    assert drag_speed_kmh_est(None, [11.0, 3.0], 1_000_000_000) is None
+    assert drag_speed_kmh_est([1.0, 3.0], None, 1_000_000_000) is None
+    assert drag_speed_kmh_est([1.0, 3.0], [11.0, 3.0], 0) is None
+    assert drag_speed_kmh_est([1.0, 3.0], [11.0, 3.0], -1) is None
+    assert drag_speed_kmh_est([1.0, 3.0], [11.0, 3.0], 300_000_000) is None  # too short
+    assert drag_speed_kmh_est([1.0, 3.0], [11.0, 3.0], 3_500_000_000) is None  # too long
+    assert drag_speed_kmh_est([6.0, 3.0], [8.0, 3.0], 1_000_000_000) is None  # net play
 
-    s3 = estimator.add_sample(ts + 2 * dt_ns, [4.0, 2.0])
-    assert s3 is None  # max_frames is 5
 
-    s4 = estimator.add_sample(ts + 3 * dt_ns, [5.0, 2.0])
-    assert s4 is None
+def test_shot_speed_is_filled_for_previous_shot_when_it_is_returned() -> None:
+    detector = ShotDetector()
+    fsm = RallyFSM()
 
-    # 5th frame triggers speed calculation
-    speed = estimator.add_sample(ts + 4 * dt_ns, [6.0, 2.0])
-    assert speed is not None
-    # 4 meters in 0.08s = 50 m/s = 180 km/h
-    assert math.isclose(speed, 180.0, abs_tol=1.0)
+    def hit(ts: int, pid: int, side: int, xy: list[float]) -> ShotInfo:
+        players = [{"id": pid, "side": side, "img_xy": [0, 0], "court_xy_m": xy}]
+        shot = detector.register_direction_change(
+            ts, px=[0, 0], players=players, audio_degraded=True
+        )
+        assert shot is not None and shot.hitter_xy_m == xy
+        fsm.on_shot(shot)
+        return shot
+
+    s1 = hit(1_000_000_000, 0, 0, [1.0, 3.0])
+    _rally_start, event = fsm.drain_events()
+    assert s1.speed_kmh_est is None and event["data"]["speed_kmh_est"] is None
+    assert "prev_speed_kmh_est" not in event["data"]
+
+    # The return fills in shot 1; the new shot's own speed stays unknown.
+    s2 = hit(2_000_000_000, 1, 1, [11.0, 3.0])
+    (event,) = fsm.drain_events()
+    assert s1.speed_kmh_est == pytest.approx(124.6)
+    assert event["data"]["prev_ts"] == s1.ts
+    assert event["data"]["prev_speed_kmh_est"] == pytest.approx(124.6)
+    assert s2.speed_kmh_est is None and fsm.prev_shot is s1 and fsm.last_shot is s2
+
+    # A stronger same-side shot replaces s2 and recomputes s1 from the new return.
+    s2b = ShotInfo(ts=2_500_000_000, by=1, speed_kmh_est=None, side=1, evidence=1.5)
+    s2b.hitter_xy_m = [7.0, 3.0]  # D=6 m in 1.5 s
+    fsm.on_shot(s2b)
+    (event,) = fsm.drain_events()
+    assert event["data"]["replaces_ts"] == s2.ts and event["data"]["prev_ts"] == s1.ts
+    expected = drag_speed_kmh_est([1.0, 3.0], [7.0, 3.0], 1_500_000_000)
+    assert s1.speed_kmh_est == expected == event["data"]["prev_speed_kmh_est"]
+
+    # Unknown returner position -> null, never a guessed number.
+    s3 = ShotInfo(ts=3_500_000_000, by=0, speed_kmh_est=None, side=0)
+    fsm.on_shot(s3)
+    assert s2b.speed_kmh_est is None and fsm.drain_events()[0]["data"]["prev_speed_kmh_est"] is None
 
 
 def test_player_attribution_selects_player_nearest_shuttle_in_image() -> None:
