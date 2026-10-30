@@ -525,3 +525,20 @@ def test_min_cost_pairs_handles_rectangular_costs() -> None:
     assert _min_cost_pairs([[5.0, 1.0], [1.0, 5.0]]) == [(0, 1), (1, 0)]
     assert _min_cost_pairs([[3.0], [1.0], [2.0]]) == [(1, 0)]
     assert _min_cost_pairs([]) == []
+
+
+def test_eight_detections_fill_four_slots_by_side_and_position(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    players_xy = [(3.0, 1.0), (3.0, 5.0), (10.0, 1.0), (10.0, 5.0)]
+    others = [(0.5, 3.0), (6.0, 0.2), (7.5, 5.9), (13.0, 3.0)]  # umpire, spectators in ROI
+    first = [{"track_id": i, **_foot(*xy)} for i, xy in enumerate(players_xy)]
+    state.ingest(PlayersMessage(frame_id=1, ts=1_000_000, players=first).to_json())
+    # Frame 1 has no history, so partners may take either slot of their side.
+    start = [p["court_xy_m"] for p in state.snapshot()["players"]]
+    detections = [{"track_id": 20 + i, **_foot(*xy)} for i, xy in enumerate(others)]
+    detections += [{"track_id": 30 + i, **_foot(x + 0.1, y)} for i, (x, y) in enumerate(players_xy)]
+    state.ingest(PlayersMessage(frame_id=2, ts=2_000_000, players=detections).to_json())
+    players = state.snapshot()["players"]
+    assert [p["side"] for p in players] == [0, 0, 1, 1]
+    for slot, (x, y) in enumerate(start):
+        assert players[slot]["court_xy_m"] == pytest.approx([x + 0.1, y])

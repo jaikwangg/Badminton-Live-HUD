@@ -8,9 +8,10 @@ import statistics
 import threading
 import time
 from collections import deque
-from itertools import permutations
 from pathlib import Path
 from typing import Any
+
+from scipy.optimize import linear_sum_assignment
 
 from hud.bus.messages import HeartbeatMessage, HitMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import COURT_LENGTH_M, load_homography, transform_point
@@ -26,22 +27,12 @@ _SIDE_MISMATCH_COST = 100.0
 
 
 def _min_cost_pairs(costs: list[list[float]]) -> list[tuple[int, int]]:
-    """Exact rectangular assignment by brute force; returns (row, col) pairs."""
-    # ponytail: permutations grow factorially; fine for <=4 slots and a few detections.
-    # Switch to scipy.optimize.linear_sum_assignment if detections per frame grow.
-    rows = len(costs)
-    cols = len(costs[0]) if rows else 0
-    if rows <= cols:
-        best = min(
-            permutations(range(cols), rows),
-            key=lambda perm: sum(costs[row][col] for row, col in enumerate(perm)),
-        )
-        return list(enumerate(best))
-    best = min(
-        permutations(range(rows), cols),
-        key=lambda perm: sum(costs[row][col] for col, row in enumerate(perm)),
-    )
-    return [(row, col) for col, row in enumerate(best)]
+    """Exact rectangular assignment (Hungarian); returns (row, col) pairs."""
+    # The players worker forwards everyone in the ROI, so detections can outnumber slots.
+    if not costs or not costs[0]:
+        return []
+    rows, cols = linear_sum_assignment(costs)
+    return list(zip(rows.tolist(), cols.tolist(), strict=True))
 
 
 def validate_game_state(value: dict[str, Any]) -> None:
