@@ -22,6 +22,9 @@ G2_MAX_MEMORY_GROWTH = 0.05
 G2_BASELINE_WINDOW_S = 3600.0  # first hour vs last hour
 G3_MAX_RESTART_S = 3.0
 RESTART_WAIT_S = 10.0
+# Random kills hit model workers; server/recorder only with --kill-server-recorder.
+MODEL_WORKERS = ("players", "shuttle", "audio")
+SERVICE_WORKERS = ("server", "recorder")
 
 
 def memory_growth(samples: list[tuple[float, float]], window_s: float) -> float | None:
@@ -123,15 +126,25 @@ def main() -> int:
     parser.add_argument("--sample-every-s", type=float, default=60.0)
     parser.add_argument("--out-dir", type=Path, default=Path("soak"))
     parser.add_argument("--seed", type=int)
+    parser.add_argument(
+        "--kill-server-recorder",
+        action="store_true",
+        help="Also pick the server and recorder for random kills",
+    )
     args = parser.parse_args()
     if not args.replay.is_file():
         parser.error(f"clip not found: {args.replay}")
     import psutil  # noqa: F401  # fail early, not after hours
 
     rng = random.Random(args.seed)
-    args.out_dir.mkdir(parents=True, exist_ok=True)
     config = build_config(args.replay.resolve(), args.config, loop=True)
-    workers = {n: w["command"] for n, w in config["workers"].items() if w.get("enabled")}
+    targets = MODEL_WORKERS + (SERVICE_WORKERS if args.kill_server_recorder else ())
+    workers = {
+        n: w["command"] for n, w in config["workers"].items() if w.get("enabled") and n in targets
+    }
+    if args.kill_every_min > 0 and not workers:
+        parser.error(f"no enabled worker to kill among {targets}")
+    args.out_dir.mkdir(parents=True, exist_ok=True)
     duration_s = args.hours * 3600
     rows: list[dict[str, Any]] = []
     restarts: list[dict[str, Any]] = []
