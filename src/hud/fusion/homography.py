@@ -23,7 +23,8 @@ def compute_homography(corners_px: list[list[float]]) -> list[list[float]]:
     if np.any(np.abs(cross) < 1e-6) or not np.all(cross > 0):
         raise ValueError("Court corners must form a convex quadrilateral in clockwise order")
     target = np.asarray(
-        [[0, 0], [COURT_LENGTH_M, 0], [COURT_LENGTH_M, COURT_WIDTH_M], [0, COURT_WIDTH_M]],
+        # Clicks run far-left, far-right, near-right, near-left; origin is our (near) left corner.
+        [[COURT_LENGTH_M, 0], [COURT_LENGTH_M, COURT_WIDTH_M], [0, COURT_WIDTH_M], [0, 0]],
         dtype=np.float64,
     )
     rows: list[list[float]] = []

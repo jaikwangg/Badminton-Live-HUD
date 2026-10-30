@@ -19,6 +19,18 @@ def test_homography_maps_reference_corners_within_one_centimeter() -> None:
     assert point == pytest.approx([6.7, 3.05], abs=0.01)
 
 
+def test_homography_maps_baselines_to_width_and_sidelines_to_length() -> None:
+    # Clockwise from far-left: far-left, far-right, near-right, near-left.
+    corners = [[300, 100], [700, 100], [900, 500], [100, 500]]
+    transform = compute_homography(corners)
+    expected = [[13.40, 0.0], [13.40, 6.10], [0.0, 6.10], [0.0, 0.0]]
+    for corner, court_xy in zip(corners, expected, strict=True):
+        assert transform_point(transform, corner) == pytest.approx(court_xy, abs=0.01)
+    # The court center is where the image diagonals cross.
+    net_center = transform_point(transform, [500, 700 / 3])
+    assert net_center == pytest.approx([6.70, 3.05], abs=0.01)
+
+
 def test_state_matches_contract_and_emits_null_unknowns(tmp_path) -> None:
     state = FusionState(tmp_path / "court_calib.json")
     state.ingest(
@@ -116,8 +128,8 @@ def test_doubles_court_points_use_full_doubles_width(tmp_path) -> None:
             frame_id=1,
             ts=1_000_000,
             players=[
-                {"track_id": 10, "bbox": [0, 0, 10, 1], "foot_px": [5, 1], "conf": 0.9},
-                {"track_id": 11, "bbox": [0, 0, 10, 99], "foot_px": [5, 99], "conf": 0.9},
+                {"track_id": 10, "bbox": [0, 0, 1, 5], "foot_px": [1, 5], "conf": 0.9},
+                {"track_id": 11, "bbox": [0, 0, 99, 5], "foot_px": [99, 5], "conf": 0.9},
             ],
         ).to_json()
     )
@@ -171,7 +183,7 @@ def test_singles_court_points_outside_singles_sidelines_are_null(tmp_path) -> No
             ts=1_000_000,
             players=[
                 {"track_id": 10, "bbox": [0, 0, 10, 10], "foot_px": [5, 1], "conf": 0.9},
-                {"track_id": 11, "bbox": [0, 0, 10, 50], "foot_px": [5, 50], "conf": 0.9},
+                {"track_id": 11, "bbox": [0, 0, 50, 95], "foot_px": [50, 95], "conf": 0.9},
             ],
         ).to_json()
     )
