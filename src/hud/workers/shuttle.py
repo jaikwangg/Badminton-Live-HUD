@@ -16,7 +16,7 @@ from PIL import Image
 
 from hud.bus.messages import Frame, HeartbeatMessage, ShuttleMessage
 from hud.bus.shm_ring import SharedFrameRing
-from hud.config import AppConfig, load_config
+from hud.config import AppConfig, endpoint, load_config
 from hud.models.shuttle import ResizedFrame, ShuttleTracker, create_shuttle_tracker
 
 LOGGER = logging.getLogger(__name__)
@@ -308,7 +308,7 @@ def _send_startup_heartbeat(publisher: Publisher) -> None:
 
 def run(config: AppConfig) -> None:
     settings = config.models["shuttle"]
-    publisher = ZmqPublisher(str(settings["endpoint"]))
+    publisher = ZmqPublisher(endpoint(config, "shuttle"))
     bus = SharedFrameRing(
         config.bus.name,
         config.source.width,
