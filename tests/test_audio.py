@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from threading import Event
 from unittest.mock import patch
 
 import numpy as np
 
 from hud.bus.messages import HitMessage
+from hud.config import AppConfig
+from hud.workers import audio
 from hud.workers.audio import (
     AudioHitDetector,
     AudioWorker,
@@ -130,3 +133,73 @@ def test_has_audio_input_device_when_none_available() -> None:
         "sounddevice.query_devices", return_value=[{"name": "Mic", "max_input_channels": 1}]
     ):
         assert has_audio_input_device() is True
+
+
+class OneTickStop:
+    """Event stand-in whose wait() times out once, then reports stop."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def wait(self, timeout: float) -> bool:
+        self.calls += 1
+        return self.calls > 1
+
+
+def test_degraded_heartbeat_goes_to_stdout_only(capsys) -> None:
+    audio._degraded_heartbeat(OneTickStop())
+    heartbeat = json.loads(capsys.readouterr().out.strip())
+    assert heartbeat["v"] == 1
+    assert heartbeat["type"] == "heartbeat"
+    assert heartbeat["worker"] == "audio"
+
+
+def _run_degraded(has_device: bool, input_stream_error: Exception | None) -> list[str]:
+    publisher = FakePublisher()
+    degraded: list[bool] = []
+    stream = patch("sounddevice.InputStream", side_effect=input_stream_error)
+    with (
+        patch.object(audio, "ZmqPublisher", return_value=publisher),
+        patch.object(audio, "has_audio_input_device", return_value=has_device),
+        patch.object(audio, "_degraded_heartbeat", lambda stop: degraded.append(True)),
+        stream,
+    ):
+        audio.run(AppConfig())
+    assert degraded == [True]
+    return publisher.messages
+
+
+def test_run_without_microphone_degrades_instead_of_crashing() -> None:
+    assert _run_degraded(has_device=False, input_stream_error=None) == []
+
+
+def test_run_survives_failed_audio_device() -> None:
+    assert _run_degraded(has_device=True, input_stream_error=OSError("device busy")) == []
+
+
+def test_capture_publishes_hits_from_main_thread_then_returns_when_stream_stops() -> None:
+    ping = _generate_tone(freq_hz=4000, duration_s=1024 / 44100, amplitude=0.5)
+
+    class FakeStream:
+        def __init__(self, callback, **kwargs) -> None:
+            self.callback = callback
+            self.checks = 0
+
+        def __enter__(self) -> FakeStream:
+            self.callback(ping[:, None], len(ping), None, None)
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            pass
+
+        @property
+        def active(self) -> bool:
+            self.checks += 1
+            return self.checks <= 2
+
+    publisher = FakePublisher()
+    worker = AudioWorker(AudioHitDetector(sensitivity=2.0), publisher, offset_ms=10.0)
+    with patch("sounddevice.InputStream", FakeStream):
+        audio._capture(worker, 44100, 1024, 8, Event())
+    hits = [HitMessage.from_json(m) for m in publisher.messages if '"hit"' in m]
+    assert len(hits) == 1

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
+from collections import deque
 from threading import Event
 from typing import Any, Protocol
 
@@ -78,7 +78,7 @@ class AudioHitDetector:
                 output="sos",
             )
         except ImportError:
-            # Fallback identity when scipy is absent
+            logger.warning("scipy missing: band-pass disabled, expect false hits")
             return np.array([[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]], dtype=np.float64)
 
     def filter_audio(self, audio: np.ndarray) -> np.ndarray:
@@ -202,6 +202,8 @@ def run(config: AppConfig) -> None:
     refractory_ms = float(settings.get("refractory_ms", 150.0))
     sensitivity = float(settings.get("sensitivity", 3.5))
 
+    queue_chunks = int(settings.get("queue_chunks", 8))
+
     detector = AudioHitDetector(
         sample_rate=sample_rate,
         low_freq=low_freq,
@@ -211,54 +213,57 @@ def run(config: AppConfig) -> None:
     )
     publisher = ZmqPublisher("ipc:///tmp/hud_audio")
     worker = AudioWorker(detector, publisher, offset_ms=offset_ms)
+    stop = Event()
+    try:
+        if not has_audio_input_device():
+            logger.warning("No audio input device; reporting audio as down")
+        else:
+            try:
+                _capture(worker, sample_rate, chunk_size, queue_chunks, stop)
+            except Exception:
+                logger.exception("Audio capture failed; reporting audio as down")
+        _degraded_heartbeat(stop)
+    finally:
+        publisher.close()
 
-    stop_event = Event()
 
-    if not has_audio_input_device():
-        # Degraded state: no microphone available.
-        # Emit stdout heartbeat so supervisor does not crash-loop,
-        # but omit ZMQ heartbeat so fusion marks status as "down".
-        logger.warning("No microphone detected. Audio worker operating in degraded down state.")
-        try:
-            while not stop_event.wait(1.0):
-                # Print supervisor heartbeat to prevent restart thrashing
-                print(
-                    json.dumps(
-                        {
-                            "v": 1,
-                            "type": "heartbeat",
-                            "worker": "audio",
-                            "ts": time.monotonic_ns(),
-                            "fps": 0.0,
-                            "proc_ms": 0.0,
-                        }
-                    ),
-                    flush=True,
-                )
-        finally:
-            publisher.close()
-        return
-
+def _capture(
+    worker: AudioWorker, sample_rate: int, chunk_size: int, queue_chunks: int, stop: Event
+) -> None:
+    """Run the mic stream until it stops; all publishing stays on this thread."""
     import sounddevice as sd
+
+    # Bounded and drops the oldest chunk; the zmq socket is not touched from the audio thread.
+    chunks: deque[tuple[int, np.ndarray]] = deque(maxlen=queue_chunks)
 
     def audio_callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         if status:
             logger.warning("Audio input overflow/underflow: %s", status)
-        worker.process(indata.copy())
+        chunks.append((time.monotonic_ns(), indata.copy()))
 
-    try:
-        with sd.InputStream(
-            samplerate=sample_rate,
-            blocksize=chunk_size,
-            channels=1,
-            dtype="float32",
-            callback=audio_callback,
-        ):
-            while not stop_event.wait(0.5):
-                if time.monotonic() - worker.last_heartbeat >= 1.0:
-                    worker._heartbeat()
-    finally:
-        publisher.close()
+    with sd.InputStream(
+        samplerate=sample_rate,
+        blocksize=chunk_size,
+        channels=1,
+        dtype="float32",
+        callback=audio_callback,
+    ) as stream:
+        while stream.active and not stop.is_set():
+            if chunks:
+                ts, chunk = chunks.popleft()
+                worker.process(chunk, timestamp_ns=ts)
+                continue
+            if time.monotonic() - worker.last_heartbeat >= 1.0:
+                worker._heartbeat()
+            stop.wait(0.005)
+    logger.warning("Audio input stream stopped")
+
+
+def _degraded_heartbeat(stop: Event) -> None:
+    """Feed the supervisor on stdout only; no zmq heartbeat, so fusion shows audio `down`."""
+    # ponytail: a mic plugged in later is not picked up until the worker is restarted.
+    while not stop.wait(1.0):
+        print(HeartbeatMessage(worker="audio", ts=time.monotonic_ns()).to_json(), flush=True)
 
 
 def main() -> None:
