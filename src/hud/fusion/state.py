@@ -119,9 +119,14 @@ class FusionState:
         self._kf = ShuttleKalmanFilter(
             predict_ms=float(shuttle.get("predict_ms", 167.0)),
             max_px_per_s=shuttle.get("max_px_per_s"),
+            direction_max_gap_ms=float(shuttle.get("direction_max_gap_ms", 500.0)),
+            rest_radius_px=float(shuttle.get("rest_radius_px", 8.0)),
+            rest_ms=float(shuttle.get("rest_ms", 400.0)),
         )
         self._fsm = RallyFSM(
-            homography=self.homography, end_gap_ms=float(rally.get("end_gap_ms", 1800.0))
+            homography=self.homography,
+            end_gap_ms=float(rally.get("end_gap_ms", 1800.0)),
+            rest_landing_ms=float(rally.get("rest_landing_ms", 3000.0)),
         )
         self._shots = ShotDetector(
             match_window_ms=float(rally.get("shot_match_window_ms", 100.0)),
@@ -134,6 +139,8 @@ class FusionState:
         self._events: list[dict[str, Any]] = []
         # Point suggestions awaiting the operator, keyed by event ts.
         self._pending_points: dict[int, dict[str, Any]] = {}
+        # Suggestions the operator already answered; a late re-emission must not reopen them.
+        self._resolved_points: deque[int] = deque(maxlen=16)
         self._track_to_id: dict[int, int] = {}
         self._mode = "singles"
         self._player_config: dict[int, dict[str, Any]] = {}
@@ -293,7 +300,9 @@ class FusionState:
                 self._record_frame("shuttle", decoded.frame_id, decoded.ts)
                 res = self._kf.update(decoded.visible, decoded.px, decoded.ts)
                 self._shuttle.update(status=res.status, img_xy=res.px)
-                self._fsm.on_shuttle_update(res.status, self._kf.last_seen_px, decoded.ts)
+                self._fsm.on_shuttle_update(
+                    res.status, self._kf.last_seen_px, decoded.ts, self._kf.rest_px
+                )
                 if res.direction_changed:
                     audio = self._workers["audio"]
                     audio_ok = (
@@ -397,6 +406,7 @@ class FusionState:
             if event_ts not in self._pending_points:
                 raise ValueError("No pending point suggestion for event_ts")
             data = self._pending_points.pop(event_ts)
+            self._resolved_points.append(event_ts)
             team = data.get("suggested_team")
             side = data.get("suggested_side")
             if team is None and side is not None:
@@ -526,6 +536,9 @@ class FusionState:
         }
         for event in self._fsm.drain_events():
             if event["kind"] == "point_suggested":
+                # The FSM re-emits with the same ts when the rest point corrects the landing.
+                if event["ts"] in self._resolved_points:
+                    continue
                 self._pending_points[event["ts"]] = event["data"]
             self._events.append(event)
 
