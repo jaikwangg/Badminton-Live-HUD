@@ -26,7 +26,6 @@ models:
   shuttle:
     backend: onnxruntime
     path: models/shuttle.onnx
-    endpoint: ipc:///tmp/hud_shuttle
     confidence_threshold: 0.45
     morph_kernel_size: 3
     min_contour_area: 5.0
@@ -98,6 +97,7 @@ fusion:
     shot_refractory_ms: 200
   shuttle:
     max_px_per_s: null      # jump filter off until measured on real clips (needs measurement)
+    predict_ms: 167         # ~10 frames at 60 fps; Kalman goes predicted -> lost after this long unseen
 server:
   ws_port: 8765
   http_port: 8080
@@ -109,3 +109,4 @@ recording:
   disk_check_interval_s: 5
   disk_retry_interval_s: 5
   state_queue_size: 2048
+  gap_log_interval_s: 10  # minimum seconds between "frames dropped" log lines

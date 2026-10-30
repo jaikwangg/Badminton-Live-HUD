@@ -79,13 +79,16 @@ def test_ring_readers_never_observe_torn_frames() -> None:
             index += 1
 
     def read_frames(ring: SharedFrameRing) -> None:
+        last_id = 0
         while not stop.is_set():
-            frame = ring.read_latest()
-            if frame is None:
-                continue
-            if frame.ts != frame.frame_id or any(byte != frame.image[0] for byte in frame.image):
-                failures.append("reader observed inconsistent frame data")
-                stop.set()
+            latest = ring.read_latest()
+            since = ring.read_since(last_id)
+            if since:
+                last_id = since[-1].frame_id
+            for frame in ([latest] if latest else []) + since:
+                if frame.ts != frame.frame_id or any(b != frame.image[0] for b in frame.image):
+                    failures.append("reader observed inconsistent frame data")
+                    stop.set()
 
     threads = [threading.Thread(target=write_frames)] + [
         threading.Thread(target=read_frames, args=(ring,)) for ring in readers
@@ -103,6 +106,25 @@ def test_ring_readers_never_observe_torn_frames() -> None:
         writer.close()
         writer.unlink()
     assert not failures
+
+
+def test_read_since_returns_newer_frames_oldest_first() -> None:
+    name = f"hud_test_{uuid.uuid4().hex}"
+    ring = SharedFrameRing(name, 4, 2)
+    try:
+        assert ring.read_since(0) == []
+        for index in range(1, 7):
+            ring.write(FakeImage(4, 2, index), index * 10)
+        assert [frame.frame_id for frame in ring.read_since(0)] == [3, 4, 5, 6]
+        newer = ring.read_since(4)
+        assert [(frame.frame_id, frame.ts, frame.image[0]) for frame in newer] == [
+            (5, 50, 5),
+            (6, 60, 6),
+        ]
+        assert ring.read_since(6) == []
+    finally:
+        ring.close()
+        ring.unlink()
 
 
 def test_reader_attach_untracks_segment(monkeypatch: pytest.MonkeyPatch) -> None:

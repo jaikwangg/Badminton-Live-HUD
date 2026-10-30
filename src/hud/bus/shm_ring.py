@@ -106,6 +106,25 @@ class SharedFrameRing:
                 return Frame(frame_id, ts, width, height, image)
         return None
 
+    def read_since(self, frame_id: int) -> list[Frame]:
+        """Return every stable frame newer than ``frame_id``, oldest first.
+
+        A slot the writer reuses mid-copy is skipped; it holds a newer frame for the next call.
+        """
+        frames: list[Frame] = []
+        for index in range(self.slots):
+            offset = index * self.slot_size
+            slot_id, ts, width, height, seq = _HEADER.unpack_from(self.shm.buf, offset)
+            if not slot_id or seq % 2 or slot_id <= frame_id:
+                continue
+            start = offset + _HEADER_SIZE
+            image = bytes(self.shm.buf[start : start + width * height * 3])
+            check = _HEADER.unpack_from(self.shm.buf, offset)
+            if check[4] == seq and check[0] == slot_id:
+                frames.append(Frame(slot_id, ts, width, height, image))
+        frames.sort(key=lambda frame: frame.frame_id)
+        return frames
+
     def close(self) -> None:
         self.shm.close()
 
