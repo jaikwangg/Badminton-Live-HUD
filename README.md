@@ -13,5 +13,6 @@
 | [docs/REFERENCES.md](docs/REFERENCES.md) | งานอ้างอิง สิ่งที่ควรและไม่ควรทำตาม และเรื่อง license |
 | [tasks/](tasks/) | การ์ดงาน T01–T11 |
 | [prototype/offline-v0/](prototype/offline-v0/) | prototype จากคลิปจริง (ประเภทคู่): โค้ด, ข้อมูลที่วิเคราะห์แล้ว, หน้า HUD, ตัวเรนเดอร์ MP4 16:9 |
+| [prototype/doubles-v2/](prototype/doubles-v2/) | prototype ที่ 2: คลิปมือถือแนวตั้ง ประเภทคู่ มีตามลูก ช็อต และความเร็วออกไม้ พร้อม HUD 1080×1920 |
 | [AGENTS.md](AGENTS.md) | กติกาสำหรับ AI agent ทุกค่าย |
 | [docs/CODEX.md](docs/CODEX.md) | วิธีใช้ Codex กับ repo นี้ |

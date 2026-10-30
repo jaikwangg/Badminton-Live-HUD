@@ -1,0 +1,9 @@
+work/
+*.mov
+*.mp4
+*.wav
+*.pt
+fonts/
+__pycache__/
+check/*.jpg
+check/*.png
