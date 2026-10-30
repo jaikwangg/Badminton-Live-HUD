@@ -7,12 +7,14 @@ import shutil
 import subprocess
 import time
 from collections import deque
+from collections.abc import Callable
 from threading import Event
 from typing import Any, Protocol
 
 import numpy as np
 
-from hud.bus.messages import HeartbeatMessage, HitMessage
+from hud.bus.messages import Frame, HeartbeatMessage, HitMessage
+from hud.bus.shm_ring import SharedFrameRing
 from hud.config import AppConfig, endpoint, load_config
 
 logger = logging.getLogger(__name__)
@@ -224,9 +226,26 @@ def run(config: AppConfig) -> None:
             if ffmpeg is None:
                 logger.warning("ffmpeg not found; reporting audio as down")
             else:
+                fps, frames = file_timing(source.path, source.fps)
+                clock = RingClock(
+                    ring_reader(config),
+                    fps,
+                    jump_ms=float(settings.get("ring_jump_ms", 50.0)),
+                    window=int(settings.get("ring_window", 8)),
+                )
                 try:
                     _replay_file(
-                        worker, ffmpeg, source.path, source.loop, sample_rate, chunk_size, stop
+                        worker,
+                        ffmpeg,
+                        source.path,
+                        source.loop,
+                        sample_rate,
+                        chunk_size,
+                        stop,
+                        clock,
+                        video_period_s=frames / fps if frames else None,
+                        poll_s=float(settings.get("ring_poll_s", 0.5)),
+                        max_lag_ms=float(settings.get("max_lag_ms", 500.0)),
                     )
                 except Exception:
                     logger.exception("Audio file decode failed; reporting audio as down")
@@ -287,6 +306,77 @@ def find_ffmpeg(config: AppConfig) -> str | None:
         return None
 
 
+class RingClock:
+    """Estimate when capture showed file time 0, from frames on the shared frame ring.
+
+    Capture creates the ring per process, so ring frame k is file frame k-1 counted across
+    loops, stamped about ``anchor + (k-1)/fps``. Capture stamps after decoding, so the
+    window minimum is the least-delayed estimate; an estimate more than ``jump_ms`` off
+    (capture rescheduled after falling behind) restarts the window.
+    """
+
+    # ponytail: a capture reconnect restarts the file at 0 while ring ids keep counting,
+    # which looks like a reschedule here; exact needs the file position in the ring (T02).
+
+    def __init__(
+        self,
+        read_latest: Callable[[], Frame | None],
+        fps: float,
+        *,
+        jump_ms: float = 50.0,
+        window: int = 8,
+    ) -> None:
+        self._read_latest = read_latest
+        self.frame_ns = 1e9 / fps
+        self.jump_ns = int(jump_ms * 1_000_000)
+        self._estimates: deque[int] = deque(maxlen=window)
+
+    def anchor_ns(self) -> int | None:
+        try:
+            frame = self._read_latest()
+        except Exception:
+            frame = None  # ring not created yet or gone: keep the last anchor
+        if frame is not None:
+            estimate = frame.ts - round((frame.frame_id - 1) * self.frame_ns)
+            if self._estimates and abs(estimate - min(self._estimates)) > self.jump_ns:
+                self._estimates.clear()
+            self._estimates.append(estimate)
+        return min(self._estimates) if self._estimates else None
+
+
+def ring_reader(config: AppConfig) -> Callable[[], Frame | None]:
+    """Read the newest ring frame, attaching per call so a restarted capture is picked up."""
+
+    def read_latest() -> Frame | None:
+        ring = SharedFrameRing(
+            config.bus.name,
+            config.source.width,
+            config.source.height,
+            config.bus.slots,
+            create=False,
+        )
+        try:
+            return ring.read_latest()
+        finally:
+            ring.close()
+
+    return read_latest
+
+
+def file_timing(path: str, default_fps: float) -> tuple[float, int]:
+    """The file's own frame rate and frame count, which FileReplaySource paces and loops by."""
+    try:
+        import cv2
+
+        capture = cv2.VideoCapture(path)
+        fps = float(capture.get(cv2.CAP_PROP_FPS))
+        frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        capture.release()
+    except Exception:
+        return default_fps, 0
+    return (fps if fps > 0 else default_fps), max(frames, 0)
+
+
 def _replay_file(
     worker: AudioWorker,
     ffmpeg: str,
@@ -295,44 +385,71 @@ def _replay_file(
     sample_rate: int,
     chunk_size: int,
     stop: Event,
+    clock: RingClock | None = None,
+    *,
+    video_period_s: float | None = None,
+    poll_s: float = 0.5,
+    max_lag_ms: float = 500.0,
 ) -> None:
     """Decode the file's audio track to mono float32 and feed it at real-time pace.
 
-    Mirrors FileReplaySource: the clock is anchored once at the first decoded sample and
-    sample k is stamped ``anchor + k / sample_rate``; looping keeps counting samples, as
-    capture keeps its frame schedule across a loop. Returns when the track ends (or the
-    file has no audio track), so the caller can report audio as down.
+    Sample k of loop pass p is stamped ``anchor + p * video_period_s + k / sample_rate``,
+    where the anchor is when capture showed file time 0 (from ``clock``, polled every
+    ``poll_s``); until the ring gives one, it is this worker's first decoded sample. Each
+    pass restarts ffmpeg and lines up with the video's pass, so a track a little longer
+    than the video (AAC padding) cannot drift across loops. Chunks already ``max_lag_ms``
+    late (this worker started after capture) are skipped to catch up. Returns when the
+    track ends (or the file has no audio track), so the caller can report audio as down.
     """
-    # ponytail: the anchor is this worker's start, not capture's open(); the start-up gap
-    # between the two processes is left to offset_ms until capture shares its file clock.
-    command = [ffmpeg, "-nostdin", "-v", "error"]
-    if loop:
-        command += ["-stream_loop", "-1"]
-    command += ["-i", path, "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "-"]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    assert process.stdout is not None
-    anchor_ns: int | None = None
-    samples = 0
-    try:
-        while not stop.is_set():
-            data = process.stdout.read(chunk_size * 4)
-            if len(data) < 4:
-                break
-            chunk = np.frombuffer(data[: len(data) // 4 * 4], dtype=np.float32)
-            if anchor_ns is None:
-                anchor_ns = time.monotonic_ns()
-            ts = anchor_ns + samples * 1_000_000_000 // sample_rate
-            samples += len(chunk)
-            # Release a chunk only once its last sample would have been heard live.
-            due_ns = anchor_ns + samples * 1_000_000_000 // sample_rate
-            delay_s = (due_ns - time.monotonic_ns()) / 1e9
-            if delay_s > 0:
-                stop.wait(delay_s)
-            worker.process(chunk, timestamp_ns=ts)
-    finally:
-        process.kill()
-        process.wait()
-    if samples == 0:
+    command = [ffmpeg, "-nostdin", "-v", "error", "-i", path, "-vn", "-ac", "1"]
+    command += ["-ar", str(sample_rate), "-f", "f32le", "-"]
+    self_anchor_ns: int | None = None
+    ring_anchor_ns: int | None = None
+    next_poll_ns = 0
+    max_lag_ns = int(max_lag_ms * 1_000_000)
+    pass_start_ns = 0  # offset of this pass from the anchor
+    total = 0
+    while not stop.is_set():
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        assert process.stdout is not None
+        samples = 0
+        try:
+            while not stop.is_set():
+                data = process.stdout.read(chunk_size * 4)
+                if len(data) < 4:
+                    break
+                chunk = np.frombuffer(data[: len(data) // 4 * 4], dtype=np.float32)
+                now_ns = time.monotonic_ns()
+                if self_anchor_ns is None:
+                    self_anchor_ns = now_ns
+                if clock is not None and now_ns >= next_poll_ns:
+                    ring_anchor_ns = clock.anchor_ns()
+                    next_poll_ns = now_ns + int(poll_s * 1e9)
+                anchor_ns = ring_anchor_ns if ring_anchor_ns is not None else self_anchor_ns
+                anchor_ns += pass_start_ns
+                ts = anchor_ns + samples * 1_000_000_000 // sample_rate
+                samples += len(chunk)
+                # Release a chunk only once its last sample would have been heard live.
+                due_ns = anchor_ns + samples * 1_000_000_000 // sample_rate
+                if due_ns < now_ns - max_lag_ns:
+                    if time.monotonic() - worker.last_heartbeat >= 1.0:
+                        worker._heartbeat()
+                    continue
+                delay_s = (due_ns - now_ns) / 1e9
+                if delay_s > 0:
+                    stop.wait(delay_s)
+                worker.process(chunk, timestamp_ns=ts)
+        finally:
+            process.kill()
+            process.wait()
+        total += samples
+        if not loop or samples == 0:
+            break
+        if video_period_s:
+            pass_start_ns += int(video_period_s * 1e9)
+        else:
+            pass_start_ns += samples * 1_000_000_000 // sample_rate
+    if total == 0:
         logger.warning("No audio track decoded from %s", path)
     else:
         logger.warning("Audio track of %s ended", path)
