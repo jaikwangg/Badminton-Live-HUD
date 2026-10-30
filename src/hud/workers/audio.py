@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 import time
 from collections import deque
 from threading import Event
@@ -214,8 +216,21 @@ def run(config: AppConfig) -> None:
     publisher = ZmqPublisher(endpoint(config, "audio"))
     worker = AudioWorker(detector, publisher, offset_ms=offset_ms)
     stop = Event()
+    source = config.source
     try:
-        if not has_audio_input_device():
+        if source.type == "file" and source.path:
+            # Same file as the capture worker (see create_source), so read its audio track.
+            ffmpeg = find_ffmpeg(config)
+            if ffmpeg is None:
+                logger.warning("ffmpeg not found; reporting audio as down")
+            else:
+                try:
+                    _replay_file(
+                        worker, ffmpeg, source.path, source.loop, sample_rate, chunk_size, stop
+                    )
+                except Exception:
+                    logger.exception("Audio file decode failed; reporting audio as down")
+        elif not has_audio_input_device():
             logger.warning("No audio input device; reporting audio as down")
         else:
             try:
@@ -257,6 +272,70 @@ def _capture(
                 worker._heartbeat()
             stop.wait(0.005)
     logger.warning("Audio input stream stopped")
+
+
+def find_ffmpeg(config: AppConfig) -> str | None:
+    """Return ``recording.ffmpeg`` if it resolves, else imageio-ffmpeg's bundled binary."""
+    found = shutil.which(str(config.recording.get("ffmpeg", "ffmpeg")))
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+
+        return str(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        return None
+
+
+def _replay_file(
+    worker: AudioWorker,
+    ffmpeg: str,
+    path: str,
+    loop: bool,
+    sample_rate: int,
+    chunk_size: int,
+    stop: Event,
+) -> None:
+    """Decode the file's audio track to mono float32 and feed it at real-time pace.
+
+    Mirrors FileReplaySource: the clock is anchored once at the first decoded sample and
+    sample k is stamped ``anchor + k / sample_rate``; looping keeps counting samples, as
+    capture keeps its frame schedule across a loop. Returns when the track ends (or the
+    file has no audio track), so the caller can report audio as down.
+    """
+    # ponytail: the anchor is this worker's start, not capture's open(); the start-up gap
+    # between the two processes is left to offset_ms until capture shares its file clock.
+    command = [ffmpeg, "-nostdin", "-v", "error"]
+    if loop:
+        command += ["-stream_loop", "-1"]
+    command += ["-i", path, "-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "f32le", "-"]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert process.stdout is not None
+    anchor_ns: int | None = None
+    samples = 0
+    try:
+        while not stop.is_set():
+            data = process.stdout.read(chunk_size * 4)
+            if len(data) < 4:
+                break
+            chunk = np.frombuffer(data[: len(data) // 4 * 4], dtype=np.float32)
+            if anchor_ns is None:
+                anchor_ns = time.monotonic_ns()
+            ts = anchor_ns + samples * 1_000_000_000 // sample_rate
+            samples += len(chunk)
+            # Release a chunk only once its last sample would have been heard live.
+            due_ns = anchor_ns + samples * 1_000_000_000 // sample_rate
+            delay_s = (due_ns - time.monotonic_ns()) / 1e9
+            if delay_s > 0:
+                stop.wait(delay_s)
+            worker.process(chunk, timestamp_ns=ts)
+    finally:
+        process.kill()
+        process.wait()
+    if samples == 0:
+        logger.warning("No audio track decoded from %s", path)
+    else:
+        logger.warning("Audio track of %s ended", path)
 
 
 def _degraded_heartbeat(stop: Event) -> None:
