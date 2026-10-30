@@ -865,13 +865,21 @@ def test_fusion_tunables_come_from_config(tmp_path) -> None:
         tmp_path / "court_calib.json",
         fusion={
             "identity": {"app_window_frames": 5, "side_mismatch_cost": 50},
-            "rally": {"end_gap_ms": 500, "shot_match_window_ms": 80, "rest_landing_ms": 2000},
+            "rally": {
+                "end_gap_ms": 500,
+                "shot_match_window_ms": 80,
+                "rest_landing_ms": 2000,
+                "reach_ratio": 0.8,
+                "serve_still_ms": 1500,
+                "alternation": "always",
+            },
             "shuttle": {
                 "max_px_per_s": 3000,
                 "predict_ms": 100,
                 "direction_max_gap_ms": 300,
                 "rest_radius_px": 5,
                 "rest_ms": 600,
+                "turn_points": 2,
             },
             "players": {"median_frames": 3, "deadband_m": 0.2},
         },
@@ -884,12 +892,33 @@ def test_fusion_tunables_come_from_config(tmp_path) -> None:
         50,
     )
     assert state._fsm.end_gap_ns == 500_000_000
-    assert state._shots.match_window_ns == 80_000_000 and state._shots.refractory_ns == 200_000_000
+    assert state._shots.match_window_ns == 80_000_000 and state._shots.refractory_ns == 300_000_000
+    assert state._shots.reach_ratio == 0.8
     assert state._kf.max_px_per_s == 3000
     assert state._kf.direction_max_gap_ns == 300_000_000
     assert (state._kf.rest_radius_px, state._kf.rest_ns) == (5, 600_000_000)
+    assert state._kf.turn_points == 2
     assert state._fsm.rest_landing_ns == 2_000_000_000
+    assert (state._fsm.serve_still_ns, state._fsm.alternation) == (1_500_000_000, "always")
     assert FusionState(tmp_path / "c.json", fusion={"shuttle": None})._kf.max_px_per_s is None
+
+
+def test_shot_is_registered_at_the_confirmed_turn_point(tmp_path) -> None:
+    state = FusionState(tmp_path / "court_calib.json")
+    calls: list[tuple[int, list[float] | None]] = []
+    register = state._shots.register_direction_change
+
+    def spy(ts: int, **kwargs):
+        calls.append((ts, kwargs["px"]))
+        return register(ts, **kwargs)
+
+    state._shots.register_direction_change = spy
+    step = 1_000_000_000 // 60
+    points = [[300.0, 500.0 - min(i, 10 - i) * 10.0] for i in range(10)]
+    for i, point in enumerate(points):
+        state.ingest(ShuttleMessage(frame_id=i, ts=i * step, visible=True, px=point).to_json())
+    # Confirmed at frame 8; the shot is the turn vertex, not the confirming frame.
+    assert calls == [(6 * step, points[5])]
 
 
 def test_health_fps_is_capture_rate_and_dropped_is_slowest_worker_skips(tmp_path) -> None:
