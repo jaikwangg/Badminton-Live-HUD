@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from threading import Event
 from typing import Any, Protocol
@@ -15,6 +16,9 @@ from hud.models.detector import Det, Detector, create_detector
 from hud.models.detector_app import chest_appearance
 
 LEFT_ANKLE, RIGHT_ANKLE = 15, 16  # COCO-17 keypoint indices
+# ponytail: fixed constants, not config; move to models.players (T01 owns config) to tune.
+ERROR_LOG_INTERVAL_S = 5.0  # at most one skipped-frame log line per interval
+MAX_FAILING_S = 5.0  # errors on every frame for longer than this exit so the supervisor restarts us
 
 
 class Publisher(Protocol):
@@ -63,6 +67,8 @@ class PlayersWorker:
         self._started = time.monotonic()
         self._last_proc_ms: float | None = None
         self._last_ts = 0
+        self._failing_since: float | None = None
+        self._last_error_log = float("-inf")
 
     def _heartbeat(self) -> None:
         now = time.monotonic()
@@ -84,6 +90,9 @@ class PlayersWorker:
         return left * width <= x <= right * width and top * height <= y <= bottom * height
 
     def _foot(self, detection: Det) -> tuple[float, float]:
+        # Ankle joints sit above the sole: ~16 px for far players (~2 m on court), so the
+        # bbox bottom is the ground contact. Ankles only refine x (and y when the bbox is
+        # clipped above them, i.e. the ankles lie below its bottom edge).
         x1, _, x2, y2 = detection.bbox
         if self.ankle_confidence is not None and detection.keypoints is not None:
             ankles = [
@@ -94,7 +103,7 @@ class PlayersWorker:
             if ankles:
                 return (
                     sum(row[0] for row in ankles) / len(ankles),
-                    sum(row[1] for row in ankles) / len(ankles),
+                    max(y2, sum(row[1] for row in ankles) / len(ankles)),
                 )
         return (x1 + x2) / 2.0, y2
 
@@ -128,6 +137,26 @@ class PlayersWorker:
         if now - self._last_heartbeat >= 1.0:
             self._heartbeat()
 
+    def process_or_skip(
+        self, frame_id: int, ts: int, width: int, height: int, image: bytes
+    ) -> None:
+        """Skip a frame that fails (e.g. a bad bus read); re-raise once failures persist."""
+        try:
+            self.process(frame_id, ts, width, height, image)
+        except Exception as exc:
+            now = time.monotonic()
+            if self._failing_since is None:
+                self._failing_since = now
+            if now - self._failing_since > MAX_FAILING_S:
+                raise
+            if now - self._last_error_log >= ERROR_LOG_INTERVAL_S:
+                print(f"players: skipped frame {frame_id}: {exc!r}", file=sys.stderr, flush=True)
+                self._last_error_log = now
+            if now - self._last_heartbeat >= 1.0:
+                self._heartbeat()
+        else:
+            self._failing_since = None
+
 
 def run(config: AppConfig) -> None:
     model_config = config.models["players"]
@@ -160,7 +189,7 @@ def run(config: AppConfig) -> None:
                 idle_wait.wait(0.001)
                 continue
             last_frame_id = frame.frame_id
-            worker.process(frame.frame_id, frame.ts, frame.width, frame.height, frame.image)
+            worker.process_or_skip(frame.frame_id, frame.ts, frame.width, frame.height, frame.image)
     finally:
         bus.close()
         publisher.close()
