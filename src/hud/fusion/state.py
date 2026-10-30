@@ -159,8 +159,10 @@ class FusionState:
         self._gallery: dict[int, list[float]] = {}
         # Per slot while the gallery fills: (first ts, samples); bounded by gallery_s.
         self._gallery_seed: dict[int, tuple[int, list[list[float]]]] = {}
-        # Side each team plays from; changes only when the operator re-posts players.
+        # Side each team plays from; changes only at an end change: the operator re-posts
+        # players, a game ends, or the deciding game reaches 11.
         self._team_side = {0: 0, 1: 1}
+        self._deciding_switched = False
         self._score: list[int | None] = [None, None]
         self._games: list[int | None] = [None, None]
         self._server: int | None = None
@@ -416,6 +418,28 @@ class FusionState:
             raise ValueError("team must be 0 or 1")
         with self._lock:
             self._score[team] = (self._score[team] or 0) + delta
+            self._check_end_change(team)
+
+    def _check_end_change(self, team: int) -> None:
+        """Badminton ends: switch after every game and at 11 in the deciding game."""
+        points = [value or 0 for value in self._score]
+        won = points[team] >= 30 or (points[team] >= 21 and points[team] - points[1 - team] >= 2)
+        games = [value or 0 for value in self._games]
+        if won:
+            games[team] += 1
+            self._games = games
+            self._score = [0, 0]
+            self._deciding_switched = False
+            self._flip_ends()
+        elif games == [1, 1] and points[team] == 11 and not self._deciding_switched:
+            # ponytail: best-of-three only; the leader's first 11 is the deciding-game switch.
+            self._deciding_switched = True
+            self._flip_ends()
+
+    def _flip_ends(self) -> None:
+        self._team_side = {team: 1 - side for team, side in self._team_side.items()}
+        for player_id, value in self._players.items():
+            value["side"] = self._slot_side(player_id)
 
     def suggest_point(
         self, event_ts: int, suggested_side: int | None, suggested_team: int | None = None
@@ -447,6 +471,7 @@ class FusionState:
                 )
             if accept and team is not None:
                 self._score[team] = (self._score[team] or 0) + 1
+                self._check_end_change(team)
 
     def reset_rally(self) -> None:
         with self._lock:
@@ -486,17 +511,6 @@ class FusionState:
                 self._players.get(second),
                 self._players.get(first),
             )
-            # A cross-team swap says the teams are on the other ends: move the team->side
-            # map to where the swapped track stands, unless it is within the net slack.
-            first_team, second_team = self._slot_team(first), self._slot_team(second)
-            history = self._player_history.get(first)
-            if (
-                first_team != second_team
-                and history is not None
-                and abs(history[1] - _NET_X_M) > self._net_slack_m
-            ):
-                side = int(history[1] > _NET_X_M)
-                self._team_side = {first_team: side, second_team: 1 - side}
             # Live data follows the track; name, colour and team stay with the id.
             for player_id in range(self._player_count):
                 if self._players.get(player_id) is None:

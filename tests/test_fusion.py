@@ -439,14 +439,39 @@ def test_end_change_by_reposting_players_moves_teams(tmp_path) -> None:
         )
 
 
-def test_cross_team_swap_moves_the_team_sides(tmp_path) -> None:
-    state = _square_court_state(tmp_path)
-    near, far = {"track_id": 10, **_foot(2.0, 3.0)}, {"track_id": 11, **_foot(11.0, 3.0)}
-    state.ingest(PlayersMessage(frame_id=1, ts=1_000_000, players=[near, far]).to_json())
-    state.swap_ids(0, 1)  # the operator says team 1 is on the near side
-    assert [p["side"] for p in state.snapshot()["players"]] == [1, 0]
-    state.swap_ids(0, 1)
-    assert [p["side"] for p in state.snapshot()["players"]] == [0, 1]
+def _sides(state: FusionState) -> list[int]:
+    return [p["side"] for p in state.snapshot()["players"]]
+
+
+def test_game_end_switches_ends_and_counts_the_game(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    state.add_score(1, 20)
+    state.add_score(0, 20)
+    state.add_score(1, 1)  # 20-21: no two-point lead yet
+    assert _sides(state) == [0, 0, 1, 1]
+    state.add_score(1, 1)  # 20-22 wins the game
+    match = state.snapshot()["match"]
+    assert (match["games"], match["score"]) == ([0, 1], [0, 0])
+    assert _sides(state) == [1, 1, 0, 0]
+    state._score = [29, 29]  # a long deuce, set directly
+    state.suggest_point(5, None, suggested_team=0)
+    state.confirm_point(5, accept=True)  # 30-29: the 30th point wins without a lead of two
+    assert state.snapshot()["match"]["games"] == [1, 1]
+    assert _sides(state) == [0, 0, 1, 1]
+
+
+def test_deciding_game_switches_ends_once_at_eleven(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    state._games = [1, 1]
+    state.add_score(0, 10)
+    state.add_score(1, 10)
+    assert _sides(state) == [0, 0, 1, 1]
+    state.add_score(1, 1)  # the leader first reaches 11
+    assert _sides(state) == [1, 1, 0, 0]
+    state.add_score(1, -1)  # an operator correction and the 11th point again: no re-switch
+    state.add_score(1, 1)
+    state.add_score(0, 1)
+    assert _sides(state) == [1, 1, 0, 0]
 
 
 def test_returning_track_is_matched_by_appearance_gallery(tmp_path) -> None:
@@ -585,11 +610,13 @@ def test_swap_ids_moves_tracks_but_names_stay_with_ids(tmp_path) -> None:
     assert swapped[1]["img_xy"] == near["foot_px"]
     assert (swapped[1]["name"], swapped[1]["color"], swapped[1]["team"]) == ("B", "#000", 1)
     assert (swapped[0]["name"], swapped[0]["img_xy"]) == ("A", far["foot_px"])
-    # The next frame keeps feeding track 10 into id 1.
+    # A cross-team swap is a correction, not an end change: team sides stay, so the next
+    # frame puts each track back on the team that plays from its side.
+    assert [p["side"] for p in swapped] == [0, 1]
     state.ingest(PlayersMessage(frame_id=2, ts=2_000_000, players=[near, far]).to_json())
     players = state.snapshot()["players"]
-    assert (players[1]["name"], players[1]["img_xy"]) == ("B", near["foot_px"])
-    assert (players[0]["name"], players[0]["img_xy"]) == ("A", far["foot_px"])
+    assert (players[0]["name"], players[0]["img_xy"]) == ("A", near["foot_px"])
+    assert (players[1]["name"], players[1]["img_xy"]) == ("B", far["foot_px"])
 
 
 def test_shuttle_has_no_court_position_while_flying(tmp_path) -> None:
