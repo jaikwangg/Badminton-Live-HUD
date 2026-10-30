@@ -308,7 +308,7 @@
     );
     const suggestion = (state.events || []).findLast((item) => item.kind === "point_suggested");
     if (suggestion) {
-      const team = suggestion.data?.suggested_side;
+      const team = suggestion.data?.suggested_team ?? suggestion.data?.suggested_side;
       pendingPoint = { ts: suggestion.ts };
       $("#suggestion-text").textContent = team === 0 || team === 1 ? `แต้มให้ ${teamName(team)}?` : "ไม่แน่ใจว่าแต้มของใคร";
       $("#point-suggestion").hidden = false;
