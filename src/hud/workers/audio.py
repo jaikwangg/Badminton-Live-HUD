@@ -11,7 +11,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from hud.bus.messages import HeartbeatMessage, HitMessage
-from hud.config import AppConfig, load_config
+from hud.config import AppConfig, endpoint, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ def run(config: AppConfig) -> None:
         refractory_ms=refractory_ms,
         sensitivity=sensitivity,
     )
-    publisher = ZmqPublisher("ipc:///tmp/hud_audio")
+    publisher = ZmqPublisher(endpoint(config, "audio"))
     worker = AudioWorker(detector, publisher, offset_ms=offset_ms)
     stop = Event()
     try:
