@@ -146,18 +146,20 @@ class FusionState:
                     track_id = detection.track_id
                     if track_id is None:
                         continue
-                    if track_id not in self._track_to_id:
-                        occupied = set(self._track_to_id.values())
-                        available = set(range(self._player_count)) - occupied
-                        if not available:
-                            continue
-                        self._track_to_id[track_id] = min(available)
-                    player_id = self._track_to_id[track_id]
                     court_xy = (
                         self._court_point(detection.foot_px)
                         if self.homography is not None
                         else None
                     )
+                    if track_id not in self._track_to_id:
+                        occupied = set(self._track_to_id.values())
+                        available = set(range(self._player_count)) - occupied
+                        if not available:
+                            continue
+                        self._track_to_id[track_id] = min(
+                            available, key=lambda slot: self._slot_distance(slot, court_xy)
+                        )
+                    player_id = self._track_to_id[track_id]
                     speed: float | None = None
                     distance: float | None = None
                     previous = self._player_history.get(player_id)
@@ -385,6 +387,14 @@ class FusionState:
     @property
     def _player_count(self) -> int:
         return 2 if self._mode == "singles" else 4
+
+    def _slot_distance(self, slot: int, court_xy: list[float] | None) -> tuple[float, int]:
+        # A new track id takes the free slot whose last known court position is nearest.
+        previous = self._player_history.get(slot)
+        if previous is None or court_xy is None:
+            return (float("inf"), slot)
+        _, prev_x, prev_y = previous
+        return ((court_xy[0] - prev_x) ** 2 + (court_xy[1] - prev_y) ** 2, slot)
 
     def _court_point(self, point_px: list[float]) -> list[float] | None:
         if self.homography is None:

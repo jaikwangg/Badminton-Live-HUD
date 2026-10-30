@@ -250,3 +250,24 @@ def test_operator_api_and_websocket_serve_contract_state(tmp_path) -> None:
                 "events",
                 "health",
             }
+
+
+def test_new_track_ids_reattach_to_nearest_player(tmp_path) -> None:
+    state = FusionState(tmp_path / "court_calib.json")
+    state.calibrate([[0, 0], [100, 0], [100, 100], [0, 100]])
+    near = {"bbox": [0, 0, 50, 90], "foot_px": [50, 90], "conf": 0.9}
+    far = {"bbox": [0, 0, 50, 10], "foot_px": [50, 10], "conf": 0.9}
+    frames = [
+        [{"track_id": 10, **near}, {"track_id": 11, **far}],
+        # Tracker re-ids both players; new ids arrive in the opposite order.
+        [{"track_id": 21, **far}, {"track_id": 20, **near}],
+    ]
+    for frame_id, players in enumerate(frames, start=1):
+        state.ingest(
+            PlayersMessage(frame_id=frame_id, ts=frame_id * 1_000_000, players=players).to_json()
+        )
+
+    snapshot = state.snapshot()
+    assert [player["tracked"] for player in snapshot["players"]] == [True, True]
+    assert snapshot["players"][0]["img_xy"] == [50, 90]
+    assert snapshot["players"][1]["img_xy"] == [50, 10]
