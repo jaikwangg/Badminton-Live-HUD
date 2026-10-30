@@ -38,6 +38,7 @@ class RallyFSM:
         homography: list[list[float]] | None = None,
         end_gap_ms: float = 1800.0,
         landing_margin_m: float = 1.0,
+        rest_landing_ms: float = 3000.0,
     ) -> None:
         if mode not in {"singles", "doubles"}:
             raise ValueError("mode must be 'singles' or 'doubles'")
@@ -48,6 +49,10 @@ class RallyFSM:
         self.end_gap_ns = int(end_gap_ms * 1_000_000)
         # Landings further than this outside the court are homography/detection errors.
         self.landing_margin_m = landing_margin_m
+        # A shuttle seen at rest this soon after the rally ended lies where it landed.
+        # Proposed config key: `fusion.rally.rest_landing_ms`.
+        self.rest_landing_ns = int(rest_landing_ms * 1_000_000)
+        self._rest_landing_used = False
         self.state: RallyState = RallyState.IDLE
         self.rally_n: int = 0
         self.shots_count: int = 0
@@ -99,6 +104,7 @@ class RallyFSM:
             self.last_shot = None
             self.prev_shot = None
             self.landing_xy_m_est = None
+            self._rest_landing_used = False
             self._pending_events.append(
                 {"ts": ts, "kind": "rally_start", "data": {"n": self.rally_n}}
             )
@@ -153,12 +159,20 @@ class RallyFSM:
             data["prev_speed_kmh_est"] = answered.speed_kmh_est
         self._pending_events.append({"ts": shot.ts, "kind": "shot", "data": data})
 
-    def on_shuttle_update(self, status: str, img_xy: list[float] | None, ts: int) -> None:
-        """Feed the Kalman status and the detected image point every frame."""
+    def on_shuttle_update(
+        self,
+        status: str,
+        img_xy: list[float] | None,
+        ts: int,
+        rest_px: list[float] | None = None,
+    ) -> None:
+        """Feed the Kalman status, the detected image point and the rest point every frame."""
         self.last_shuttle_status = status
         if status == "tracked" and img_xy is not None:
             self.last_seen_px = list(img_xy)
             self.last_seen_ts = ts
+        if rest_px is not None and not self._rest_landing_used:
+            self._on_rest(rest_px, ts)
 
         if not self.is_active:
             return
@@ -186,6 +200,28 @@ class RallyFSM:
         suggestion = self._evaluate_point_suggestion(self._landing_court_xy(), self.last_shot)
         self.landing_xy_m_est = suggestion["landing_xy_m_est"]
         self._pending_events.append({"ts": ts, "kind": "point_suggested", "data": suggestion})
+
+    def _on_rest(self, rest_px: list[float], ts: int) -> None:
+        # The rest point is the true landing; it beats the last in-flight sighting.
+        if self.is_active:
+            self.last_seen_px = list(rest_px)
+            self._rest_landing_used = True
+            return
+        if self.state != RallyState.END or ts - self.end_ts > self.rest_landing_ns:
+            return
+        self._rest_landing_used = True
+        if self.shots_count == 0 or self.current_t_ms == 0:
+            return  # false start: no suggestion to correct
+        self.last_seen_px = list(rest_px)
+        landing = self._landing_court_xy()
+        if landing is None:
+            return
+        suggestion = self._evaluate_point_suggestion(landing, self.last_shot)
+        self.landing_xy_m_est = suggestion["landing_xy_m_est"]
+        # Same ts as the original suggestion, so the operator's pending entry is replaced.
+        self._pending_events.append(
+            {"ts": self.end_ts, "kind": "point_suggested", "data": suggestion}
+        )
 
     def _emit_rally_end(self, ts: int) -> None:
         # Every emitted rally_start gets exactly one rally_end, false starts included.

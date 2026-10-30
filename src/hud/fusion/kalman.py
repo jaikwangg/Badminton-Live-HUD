@@ -44,7 +44,19 @@ class ShuttleKalmanFilter:
         max_px_per_s: float | None = None,
         max_jump_frames: int = 3,
         direction_max_gap_ms: float = 500.0,
+        rest_radius_px: float = 8.0,
+        rest_ms: float = 400.0,
     ) -> None:
+        # A shuttle whose detections stay within rest_radius_px of one point for rest_ms is
+        # lying on the floor (or held): not in play. Reported as 'lost' (no 'resting' status in
+        # the contract), it neither counts as flight nor keeps the rally alive.
+        # ponytail: proposed config keys `fusion.shuttle.rest_radius_px` / `rest_ms` for T01;
+        # 8 px / 400 ms is from one 4 Hz CPU clip, re-check at GPU rates.
+        self.rest_radius_px = rest_radius_px
+        self.rest_ns = int(rest_ms * 1_000_000)
+        self._rest_anchor: tuple[float, float] | None = None
+        self._rest_since_ts = 0
+        self.resting = False
         # Direction memory survives a loss up to this gap (a hit hidden by the hitter's body,
         # or one missed message at ~4 Hz). Shot-to-shot is rarely under 0.5 s, so such a gap
         # hides at most one hit and the chord across it still shows the reversal.
@@ -83,6 +95,11 @@ class ShuttleKalmanFilter:
         """Last accepted image detection; the landing estimate is taken from it."""
         return list(self._last_observation) if self._last_observation is not None else None
 
+    @property
+    def rest_px(self) -> list[float] | None:
+        """Image point where the shuttle lies at rest, None unless it is resting now."""
+        return list(self._rest_anchor) if self.resting and self._rest_anchor else None
+
     def reset(self) -> None:
         """Clear filter state and mark shuttle as lost."""
         self._x = np.zeros(4, dtype=np.float64)
@@ -93,6 +110,8 @@ class ShuttleKalmanFilter:
         self._last_observation = None
         self.last_seen_ts = None
         self._jump_frames = 0
+        self._rest_anchor = None
+        self.resting = False
         self.status = "lost"
 
     def _get_dt(self, ts: int) -> float:
@@ -185,6 +204,25 @@ class ShuttleKalmanFilter:
             zx, zy = float(px[0]), float(px[1])
             z = np.array([zx, zy], dtype=np.float64)
 
+            anchor = self._rest_anchor
+            if anchor is None or math.hypot(zx - anchor[0], zy - anchor[1]) > self.rest_radius_px:
+                # Fixed anchor: a slowly flying shuttle drifts out of the radius and restarts it.
+                self._rest_anchor = (zx, zy)
+                self._rest_since_ts = ts
+                self.resting = False
+            elif ts - self._rest_since_ts >= self.rest_ns:
+                self.resting = True
+            if self.resting:
+                # Filter state is left untouched, so the next real flight starts fresh.
+                self.status = "lost"
+                return ShuttleTrackResult(
+                    status="lost",
+                    px=None,
+                    velocity=(0.0, 0.0),
+                    speed_px_s=0.0,
+                    direction_changed=False,
+                )
+
             if not self._initialized or self.status == "lost":
                 # At low message rates one miss already means lost; keep the direction
                 # history across a short gap instead of needing 3 fresh detections.
@@ -264,7 +302,7 @@ class ShuttleKalmanFilter:
             )
 
         # Shuttle is not visible in this frame
-        if not self._initialized:
+        if not self._initialized or self.resting:
             self.status = "lost"
             return ShuttleTrackResult(
                 status="lost",
