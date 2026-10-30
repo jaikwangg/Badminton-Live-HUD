@@ -65,6 +65,7 @@ _Changelog:_
 - _2026-10-29 เปลี่ยน `shuttle.court_xy_m` เป็น `landing_xy_m_est` ตอนนี้ยังไม่มีโค้ดที่ใช้ฟิลด์นี้ จึงไม่ต้องเพิ่มเลขเวอร์ชัน (`v`)_
 - _2026-10-30 รองรับประเภทคู่: `match.mode` = `doubles`, เพิ่ม `players[].team`, `app` ใน message `players` ของ worker, `mode` ใน `/api/players` และ `team` ใน `/api/score` (ยังรับ `side` แบบเดิม) เข้ากับของเดิมทั้งหมด จึงไม่เพิ่มเลขเวอร์ชัน_
 - _2026-10-30 เพิ่ม `GET /api/frame.jpg` ให้หน้า operator ดึงภาพไปคาลิเบรตได้เอง (G7) เป็น endpoint ใหม่ ไม่กระทบของเดิม_
+- _2026-10-30 Recording: เปลี่ยน `video.mp4` เป็นไฟล์ mkv แบ่งท่อน `video_NNN.mkv` ตามที่ recorder (T10) เขียนอยู่แล้ว_
 
 ## Operator API (HTTP `:8080`)
 
@@ -80,4 +81,4 @@ _Changelog:_
 | GET | `/api/frame.jpg` | → ภาพ JPEG ของเฟรมล่าสุดใน frame bus ขนาดเท่าภาพต้นฉบับ (พิกัดตรงกับ `corners_px`) ถ้ายังไม่มีเฟรมตอบ `503` ใช้สำหรับหน้าคาลิเบรตเท่านั้น ไม่ใช่สตรีม |
 
 ## Recording
-`recordings/<YYYYMMDD-HHMMSS>/` เก็บ `video.mp4`, `events.jsonl` (GameState ทุกเฟรม) และ `config.snapshot.yaml`
+`recordings/<YYYYMMDD-HHMMSS>/` เก็บ `video_000.mkv`, `video_001.mkv`, … (แบ่งท่อนทุก `recording.segment_seconds` เป็น mkv เพราะยังเปิดได้แม้โปรแกรมถูกปิดกะทันหัน), `events.jsonl` (GameState ทุกเฟรม) และ `config.snapshot.yaml`
