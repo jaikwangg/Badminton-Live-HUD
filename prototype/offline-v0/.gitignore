@@ -9,3 +9,5 @@ out/
 *.pt
 __pycache__/
 fonts/
+# raw detection data, archived in the media branch (stage1-offline-v0/data/)
+data/dets2.json

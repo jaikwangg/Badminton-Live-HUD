@@ -46,6 +46,16 @@ ffmpeg -i src.mov -vn -ac 1 -ar 44100 audio.wav
 python3 shots.py && python3 report.py && python3 render_v3.py out.mp4    # report/render ต้องมีวิดีโอ
 ```
 
+`dets2.jsonl` (8.3 MB, ผลของขั้น 6 `chest2.py`) และ `cands.json` (8.1 MB, ผลของขั้น 7 `shuttle_cands.py`) ย้ายไปเก็บใน branch `media` แล้ว ขั้น 8 เป็นต้นไปไม่ต้องใช้ แต่ถ้าจะรัน `players.py`, `shuttle_track.py` หรือ `tools/flight.py`, `tools/strip.py`, `tools/tplot.py` ใหม่ ให้ดึงมาก่อน (รันจาก `prototype/doubles-v2/`):
+
+```bash
+git fetch origin media
+git show origin/media:stage2-doubles-v2/data/dets2.jsonl > data/dets2.jsonl
+git show origin/media:stage2-doubles-v2/data/cands.json > data/cands.json
+```
+
+ถ้าไม่มีไฟล์เหล่านี้ สคริปต์ข้างบนจะหยุดด้วย `FileNotFoundError` เฉยๆ โดยไม่บอกว่าต้องไปดึงจาก `media`
+
 ## แก้ผลด้วย `config.json`
 
 - `add_shots`: เพิ่มช็อต `{"t": 12.34, "player": "บอส"}` จะแทนที่ช็อตอัตโนมัติที่อยู่ห่างไม่เกิน 0.25 วิ

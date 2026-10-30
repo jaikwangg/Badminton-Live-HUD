@@ -6,3 +6,6 @@ work/
 *.pt
 fonts/
 __pycache__/
+# raw detection data, archived in the media branch (stage2-doubles-v2/data/)
+data/dets2.jsonl
+data/cands.json

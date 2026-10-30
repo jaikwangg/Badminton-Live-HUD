@@ -52,14 +52,21 @@ HUD_PREVIEW=20.4 python3 pipeline/render_mp4.py out/preview.png                 
 # เปิด site/index.html (ต้องมี site/clip720.mp4 อยู่ข้างกัน build.py จะก๊อปจาก data/ ให้ถ้ามี)
 ```
 
-ถ้าจะรันแค่ขั้น 5–7 ใช้ข้อมูลใน `data/` ได้เลย ขั้น 5 กับ 7 รันได้ทันที ส่วนขั้น 6 ต้องมี `data/audio.wav`
+ถ้าจะรันแค่ขั้น 5–7 ใช้ข้อมูลใน `data/` ได้เลย ขั้น 7 รันได้ทันที ขั้น 6 ต้องมี `data/audio.wav` ส่วนขั้น 5 ต้องมี `data/dets2.json` (8.3 MB) ซึ่งย้ายไปเก็บใน branch `media` แล้ว ดึงมาด้วย:
+
+```bash
+git fetch origin media
+git show origin/media:stage1-offline-v0/data/dets2.json > data/dets2.json
+```
+
+ถ้าไม่มีไฟล์นี้ `identify.py` จะหยุดด้วย `FileNotFoundError` เฉยๆ โดยไม่บอกว่าต้องไปดึงจาก `media`
 
 ## ไฟล์ใน `data/`
 
 | ไฟล์ | เนื้อหา |
 |---|---|
 | `calib.json` | homography 3×3 (ภาพ 1920×1078 → เมตรบนพื้น, X = ความกว้าง 0–6.10, Y = ระยะจากเส้นหลังฝั่งเรา 0–13.40) |
-| `dets2.json` | ผลตรวจจับทุกเฟรม: bbox, keypoints 17 จุด, ตำแหน่งบนคอร์ท, track id, ค่าสี |
+| `dets2.json` | ผลตรวจจับทุกเฟรม: bbox, keypoints 17 จุด, ตำแหน่งบนคอร์ท, track id, ค่าสี (ไม่อยู่ใน branch นี้ ดึงจาก `media` ตามด้านบน) |
 | `far_dets.json` | ผลตรวจจับเพิ่มจากการสแกนฝั่งไกล |
 | `players.json` | ตำแหน่ง/ความเร็ว/ระยะของ 4 คนทุกเฟรม (30 fps) |
 | `events.json` | shot, rally, สัญญาณการเหวี่ยงแขน |
