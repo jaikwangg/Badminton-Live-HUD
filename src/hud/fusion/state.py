@@ -23,16 +23,19 @@ def validate_game_state(value: dict[str, Any]) -> None:
     if set(value) != {"v", "ts", "match", "rally", "players", "shuttle", "events", "health"}:
         raise ValueError("GameState top-level fields do not match Contract v1")
     match = value["match"]
+    mode = match.get("mode")
     if (
-        match.get("mode") != "singles"
+        mode not in {"singles", "doubles"}
         or len(match.get("score", [])) != 2
         or len(match.get("games", [])) != 2
     ):
         raise ValueError("Invalid match fields")
     if not {"active", "n", "t_ms", "shots"}.issubset(value["rally"]):
         raise ValueError("Invalid rally fields")
-    if len(value["players"]) != 2:
-        raise ValueError("Singles GameState must contain exactly two player slots")
+    expected_players = 2 if mode == "singles" else 4
+    if len(value["players"]) != expected_players:
+        raise ValueError(f"{mode.title()} GameState must contain {expected_players} player slots")
+    side_counts = [0, 0]
     for player_id, player in enumerate(value["players"]):
         required = {
             "id",
@@ -48,6 +51,16 @@ def validate_game_state(value: dict[str, Any]) -> None:
         }
         if set(player) != required or player["id"] != player_id:
             raise ValueError("Invalid player schema")
+        if player["side"] not in (0, 1):
+            raise ValueError("Every player side must be 0 or 1")
+        side_counts[player["side"]] += 1
+        court_xy = player["court_xy_m"]
+        if court_xy is not None:
+            lower_y, upper_y = (0.0, 6.10) if mode == "doubles" else (0.46, 5.64)
+            if len(court_xy) != 2 or not lower_y <= court_xy[1] <= upper_y:
+                raise ValueError(f"Player court y is outside the {mode} sidelines")
+    if any(count not in (1, 2) for count in side_counts):
+        raise ValueError("Each side must have one or two players")
     shuttle = value["shuttle"]
     if set(shuttle) != {"status", "img_xy", "court_xy_m", "last_shot"}:
         raise ValueError("Invalid shuttle fields")
@@ -75,6 +88,7 @@ class FusionState:
         self._latencies_ms: deque[float] = deque(maxlen=256)
         self._events: list[dict[str, Any]] = []
         self._track_to_id: dict[int, int] = {}
+        self._mode = "singles"
         self._player_config: dict[int, dict[str, Any]] = {}
         self._players: dict[int, dict[str, Any]] = {}
         self._player_history: dict[int, tuple[int, float, float]] = {}
@@ -117,13 +131,29 @@ class FusionState:
                     self._fps = (len(self._frame_times) - 1) / elapsed if elapsed else 0.0
                 for player in self._players.values():
                     player["tracked"] = False
+                current_track_ids = {
+                    detection.track_id
+                    for detection in decoded.players
+                    if detection.track_id is not None
+                }
+                self._track_to_id = {
+                    track_id: player_id
+                    for track_id, player_id in self._track_to_id.items()
+                    if track_id in current_track_ids
+                }
                 for detection in decoded.players:
                     track_id = detection.track_id
-                    player_id = self._track_to_id.setdefault(track_id, len(self._track_to_id))
-                    if player_id > 1:
+                    if track_id is None:
                         continue
+                    if track_id not in self._track_to_id:
+                        occupied = set(self._track_to_id.values())
+                        available = set(range(self._player_count)) - occupied
+                        if not available:
+                            continue
+                        self._track_to_id[track_id] = min(available)
+                    player_id = self._track_to_id[track_id]
                     court_xy = (
-                        transform_point(self.homography, detection.foot_px)
+                        self._court_point(detection.foot_px)
                         if self.homography is not None
                         else None
                     )
@@ -150,7 +180,7 @@ class FusionState:
                         "id": player_id,
                         "name": metadata.get("name"),
                         "color": metadata.get("color"),
-                        "side": metadata.get("side"),
+                        "side": metadata.get("side", player_id % 2),
                         "tracked": True,
                         "img_xy": detection.foot_px,
                         "bbox": detection.bbox,
@@ -162,8 +192,8 @@ class FusionState:
                 decoded = ShuttleMessage.from_json(payload)
                 self._record_latency(decoded.ts)
                 court_xy = (
-                    transform_point(self.homography, decoded.px)
-                    if decoded.visible and decoded.px and self.homography is not None
+                    self._court_point(decoded.px)
+                    if (decoded.visible and decoded.px and self.homography is not None)
                     else None
                 )
                 self._shuttle.update(
@@ -193,14 +223,33 @@ class FusionState:
             self.homography = save_homography(self.calibration_path, corners_px)
 
     def set_players(self, players: list[dict[str, Any]]) -> None:
+        if len(players) not in (2, 4):
+            raise ValueError("Players must contain exactly two or four players")
+        player_ids = [int(player["id"]) for player in players]
+        if set(player_ids) != set(range(len(players))):
+            raise ValueError("Player IDs must be consecutive starting at zero")
+        side_counts = [0, 0]
+        for player in players:
+            side = player.get("side")
+            if side not in (0, 1):
+                raise ValueError("Every player side must be 0 or 1")
+            side_counts[side] += 1
+        if any(count not in (1, 2) for count in side_counts):
+            raise ValueError("Each side must have one or two players")
         with self._lock:
+            new_mode = "singles" if len(players) == 2 else "doubles"
+            if new_mode != self._mode:
+                self._players.clear()
+                self._player_history.clear()
+                self._track_to_id.clear()
+            self._mode = new_mode
             self._player_config = {int(player["id"]): dict(player) for player in players}
             for player_id, value in self._players.items():
                 metadata = self._player_config.get(player_id, {})
                 value.update(
                     name=metadata.get("name"),
                     color=metadata.get("color"),
-                    side=metadata.get("side"),
+                    side=metadata.get("side", player_id % 2),
                 )
 
     def add_score(self, side: int, delta: int) -> None:
@@ -210,8 +259,8 @@ class FusionState:
             self._score[side] = (self._score[side] or 0) + delta
 
     def swap_ids(self, first: int, second: int) -> None:
-        if first not in (0, 1) or second not in (0, 1):
-            raise ValueError("player IDs must be 0 or 1")
+        if first not in range(self._player_count) or second not in range(self._player_count):
+            raise ValueError(f"player IDs must be between 0 and {self._player_count - 1}")
         with self._lock:
             self._track_to_id = {
                 track_id: second
@@ -263,12 +312,15 @@ class FusionState:
             events = self._events
             if drain_events:
                 self._events = []
-            players = [self._players.get(index, self._empty_player(index)) for index in range(2)]
+            players = [
+                self._players.get(index, self._empty_player(index))
+                for index in range(self._player_count)
+            ]
             result = {
                 "v": 1,
                 "ts": self._ts,
                 "match": {
-                    "mode": "singles",
+                    "mode": self._mode,
                     "score": list(self._score),
                     "games": list(self._games),
                     "server": self._server,
@@ -294,7 +346,7 @@ class FusionState:
             "id": player_id,
             "name": None,
             "color": None,
-            "side": None,
+            "side": player_id % 2,
             "tracked": False,
             "img_xy": None,
             "bbox": None,
@@ -302,3 +354,14 @@ class FusionState:
             "speed_mps": None,
             "dist_m": None,
         }
+
+    @property
+    def _player_count(self) -> int:
+        return 2 if self._mode == "singles" else 4
+
+    def _court_point(self, point_px: list[float]) -> list[float] | None:
+        if self.homography is None:
+            return None
+        point = transform_point(self.homography, point_px)
+        lower_y, upper_y = (0.0, 6.10) if self._mode == "doubles" else (0.46, 5.64)
+        return point if lower_y <= point[1] <= upper_y else None
