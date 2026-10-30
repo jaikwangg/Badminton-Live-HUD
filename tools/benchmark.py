@@ -25,6 +25,7 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))  # hud.config, when run from a checkout
 
 # G1 thresholds from docs/GOALS.md.
 G1_MIN_FPS = 60.0
@@ -80,7 +81,8 @@ def build_config(clip: Path, config_path: Path | None, *, loop: bool) -> dict[st
 
 
 class System:
-    """Production launch path: `hud.supervisor` (workers + capture) and the HTTP/WS server.
+    """Production launch path: `hud.supervisor`, which starts every enabled `workers` entry
+    (capture, models, the HTTP/WS server and the recorder).
 
     Children load config via HUD_DEFAULT_CONFIG, so every process sees the same file.
     """
@@ -98,10 +100,8 @@ class System:
         self.processes: list[subprocess.Popen[bytes]] = []
 
     def start(self) -> None:
-        for module in ("hud.supervisor", "hud.server.operator_api"):
-            self.processes.append(
-                subprocess.Popen([sys.executable, "-m", module], cwd=ROOT, env=self.env)
-            )
+        command = [sys.executable, "-m", "hud.supervisor"]
+        self.processes.append(subprocess.Popen(command, cwd=ROOT, env=self.env))
 
     @property
     def supervisor_pid(self) -> int:
@@ -184,18 +184,21 @@ def get_health(port: int) -> dict[str, Any] | None:
         return None
 
 
-async def _heartbeats(workers: list[str], fps: dict[str, float]) -> None:
+async def _heartbeats(bus: dict[str, Any], workers: list[str], fps: dict[str, float]) -> None:
     """Last heartbeat fps per worker from the same PUB sockets fusion subscribes to."""
     import zmq
     import zmq.asyncio
 
+    from hud.config import AppConfig, BusConfig, endpoint
+
+    app_config = AppConfig(bus=BusConfig(**bus))
     context = zmq.asyncio.Context.instance()
     poller = zmq.asyncio.Poller()
     for worker in workers:
         socket = context.socket(zmq.SUB)
         socket.setsockopt(zmq.LINGER, 0)
         socket.setsockopt(zmq.SUBSCRIBE, b"")
-        socket.connect(f"ipc:///tmp/hud_{worker}")
+        socket.connect(endpoint(app_config, worker))
         poller.register(socket, zmq.POLLIN)
     while True:
         for socket, _ in await poller.poll(timeout=100):
@@ -214,20 +217,14 @@ async def collect(
 
     ws_port = config["server"]["ws_port"]
     http_port = config["server"]["http_port"]
+    # Only workers with a bus endpoint publish heartbeats over ZeroMQ.
     zmq_workers = [
         name
         for name, worker in config["workers"].items()
-        if worker.get("enabled") and name != "capture"
+        if worker.get("enabled") and name in config["bus"]["endpoints"]
     ]
     worker_fps: dict[str, float] = {}
-    try:
-        import zmq
-
-        ipc = zmq.has("ipc")
-    except ImportError:
-        ipc = False
-    # Without ipc (e.g. Windows libzmq builds) per-worker fps stays null.
-    heartbeat_task = asyncio.create_task(_heartbeats(zmq_workers, worker_fps)) if ipc else None
+    heartbeat_task = asyncio.create_task(_heartbeats(config["bus"], zmq_workers, worker_fps))
 
     deadline = time.monotonic() + STARTUP_TIMEOUT_S
     while True:
@@ -273,8 +270,7 @@ async def collect(
                 gpu = await asyncio.to_thread(gpu_sample)
                 if gpu is not None:
                     gpu_samples.append(gpu)
-    if heartbeat_task is not None:
-        heartbeat_task.cancel()
+    heartbeat_task.cancel()
 
     fps_values = [h["fps"] for h in health_samples if h.get("fps")]
     dropped = [h["dropped"] for h in health_samples if h.get("dropped") is not None]
@@ -325,7 +321,9 @@ def main() -> int:
     system = System(config)
     system.start()
     try:
-        result = asyncio.run(collect(config, args.seconds, system.alive))
+        # zmq.asyncio needs add_reader, which the default Windows (proactor) loop lacks.
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            result = runner.run(collect(config, args.seconds, system.alive))
     except Exception as exc:  # the CLI reports any abort the same way
         print(f"benchmark aborted: {exc!r}", file=sys.stderr)
         return 2
