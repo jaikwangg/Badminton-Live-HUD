@@ -33,6 +33,9 @@ models:
     max_gap: 2
     background_sample_count: 30
     background_update_interval_s: 30.0
+    # Seconds the background median samples are spread over, so players who move drop out.
+    # Not tuned on real 60 fps clips.
+    background_sample_span_s: 10.0
 bus:
   name: hud_frames
   slots: 4
@@ -96,9 +99,18 @@ fusion:
     end_gap_ms: 1800        # LESSONS §6
     shot_match_window_ms: 100
     shot_refractory_ms: 200
+    rest_landing_ms: 3000   # shuttle seen at rest this soon after rally end = landing point; not tuned on real 60 fps clips
+  players:
+    # Player court xy: median of the last N frames; moves under deadband_m are ignored.
+    # Picked by replaying a 180 s doubles WS log; not tuned on real 60 fps clips.
+    median_frames: 5
+    deadband_m: 0.15
   shuttle:
     max_px_per_s: null      # jump filter off until measured on real clips (needs measurement)
     predict_ms: 167         # ~10 frames at 60 fps; Kalman goes predicted -> lost after this long unseen
+    direction_max_gap_ms: 500  # direction memory survives a loss up to this gap; not tuned on real 60 fps clips
+    rest_radius_px: 8.0     # detections within this radius count as the shuttle at rest; not tuned on real 60 fps clips
+    rest_ms: 400.0          # at rest this long -> shuttle not in play; not tuned on real 60 fps clips
 server:
   ws_port: 8765
   http_port: 8080

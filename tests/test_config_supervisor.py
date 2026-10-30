@@ -55,6 +55,25 @@ def test_fusion_section_is_plain_dict_with_empty_default(
     assert load_config().fusion == {}
 
 
+def test_default_config_matches_code_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    import inspect
+
+    from hud.fusion.kalman import ShuttleKalmanFilter
+    from hud.fusion.rally_fsm import RallyFSM
+    from hud.workers.shuttle import BACKGROUND_SAMPLE_SPAN_S
+
+    monkeypatch.delenv("HUD_DEFAULT_CONFIG", raising=False)
+    config = load_config()
+    kf = inspect.signature(ShuttleKalmanFilter).parameters
+    for key in ("direction_max_gap_ms", "rest_radius_px", "rest_ms"):
+        assert config.fusion["shuttle"][key] == kf[key].default
+    fsm = inspect.signature(RallyFSM).parameters
+    assert config.fusion["rally"]["rest_landing_ms"] == fsm["rest_landing_ms"].default
+    # FusionState's .get() fallbacks for fusion.players.
+    assert config.fusion["players"] == {"median_frames": 5, "deadband_m": 0.15}
+    assert config.models["shuttle"]["background_sample_span_s"] == BACKGROUND_SAMPLE_SPAN_S
+
+
 HEARTBEAT_COMMAND = [
     sys.executable,
     "-u",
