@@ -44,4 +44,9 @@ server:
   http_port: 8080
 recording:
   directory: recordings
+  ffmpeg: ffmpeg
   min_free_gb: 5
+  segment_seconds: 1800
+  disk_check_interval_s: 5
+  disk_retry_interval_s: 5
+  state_queue_size: 2048
