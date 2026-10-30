@@ -1,0 +1,10 @@
+{
+ "stats": {
+  "pred": 2410,
+  "refined": 994,
+  "redetect": 100
+ },
+ "overlap_p10": 0.855,
+ "overlap_median": 0.943,
+ "jitter_px": 7.95366290054244
+}

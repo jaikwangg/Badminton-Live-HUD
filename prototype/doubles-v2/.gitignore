@@ -1,0 +1,11 @@
+# working dir and generated media (the media itself is kept in /media via Git LFS)
+work/
+*.mov
+*.mp4
+*.wav
+*.pt
+fonts/
+__pycache__/
+# raw detection data, archived in the media branch (stage2-doubles-v2/data/)
+data/dets2.jsonl
+data/cands.json
