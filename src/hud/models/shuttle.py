@@ -22,13 +22,19 @@ class TensorInfo:
 
 @dataclass(frozen=True, slots=True)
 class ResizedFrame:
-    """An RGB frame resized once for the TrackNet input, with source geometry retained."""
+    """An RGB frame resized once for the TrackNet input, with source geometry retained.
+
+    source_width/height are the size of the region the model saw (the crop, or the full
+    frame); origin_x/y place that region's top-left corner in full-frame pixels.
+    """
 
     frame_id: int
     ts: int
     source_width: int
     source_height: int
     image_rgb: np.ndarray
+    origin_x: int = 0
+    origin_y: int = 0
     # Normalised float32 CHW copy, built once so each inference only copies it.
     chw: np.ndarray = field(init=False, repr=False, compare=False)
 
@@ -310,8 +316,8 @@ class TrackNetV3Tracker:
         confidence, _, x, y = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
         source = frames[-1]
         px = [
-            (x + 0.5) * source.source_width / self.width,
-            (y + 0.5) * source.source_height / self.height,
+            source.origin_x + (x + 0.5) * source.source_width / self.width,
+            source.origin_y + (y + 0.5) * source.source_height / self.height,
         ]
         return True, px, confidence
 
