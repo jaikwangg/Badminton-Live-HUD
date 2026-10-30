@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
+import signal
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +16,7 @@ import numpy as np
 import pytest
 import yaml
 
+from hud.bus import shm_ring
 from hud.bus.messages import Frame
 from hud.bus.shm_ring import SharedFrameRing
 from hud.config import AppConfig
@@ -230,9 +234,9 @@ def test_per_slot_read_never_skips_when_frames_outpace_the_poll() -> None:
         # A slot mid-write (odd seq) is skipped rather than read torn.
         ring.write(np.zeros((1, 2, 3), dtype=np.uint8), 0)
         slot = 15 % ring.slots
-        header = list(writer._SLOT_HEADER.unpack_from(ring.shm.buf, slot * ring.slot_size))
+        header = list(shm_ring._HEADER.unpack_from(ring.shm.buf, slot * ring.slot_size))
         header[4] += 1
-        writer._SLOT_HEADER.pack_into(ring.shm.buf, slot * ring.slot_size, *header)
+        shm_ring._HEADER.pack_into(ring.shm.buf, slot * ring.slot_size, *header)
         assert read_new_frames(ring, 14) == []
     finally:
         ring.close()
@@ -307,3 +311,51 @@ def test_reader_catches_timeout_value_error_and_other_exceptions(
 
     asyncio.run(run_reader())
     assert attempts == 3
+
+
+def test_stop_signal_finalizes_ffmpeg_segment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """SIGTERM (or stop() where it cannot be caught) must close FFmpeg's stdin so it exits 0."""
+    marker = tmp_path / "ffmpeg.bytes"
+    fake_ffmpeg = (
+        f"import sys; n = len(sys.stdin.buffer.read()); open({str(marker)!r}, 'w').write(str(n))"
+    )
+    real_popen = subprocess.Popen
+    processes: list[subprocess.Popen[bytes]] = []
+
+    def spawn_fake(_command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        processes.append(real_popen([sys.executable, "-c", fake_ffmpeg], **kwargs))  # type: ignore[call-overload]
+        return processes[-1]
+
+    monkeypatch.setattr(VideoEncoder, "_probe_nvenc", lambda _self: False)
+    monkeypatch.setattr(writer.subprocess, "Popen", spawn_fake)
+    monkeypatch.setattr(writer.shutil, "which", lambda _name: sys.executable)
+    config = _config(tmp_path / "rec")
+    config.bus.name = f"hud_test_{uuid.uuid4().hex}"
+    config.source.width, config.source.height = 2, 1
+    config.server["ws_port"] = 9  # nothing listens; the state reader just retries
+    ring = SharedFrameRing(config.bus.name, 2, 1)
+    recorder = Recorder(config, heartbeat_callback=lambda _payload: None)
+
+    async def run() -> None:
+        task = asyncio.create_task(recorder.run())
+        writer.install_stop_signals(recorder)
+        deadline = time.monotonic() + 10
+        for count in range(1, 4):  # one at a time: the first poll keeps only the newest frame
+            ring.write(np.zeros((1, 2, 3), dtype=np.uint8), time.monotonic_ns())
+            while recorder._frame_count < count and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+        if sys.platform == "win32":
+            recorder.stop()  # TerminateProcess cannot be caught on Windows
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(task, timeout=10)
+
+    try:
+        asyncio.run(run())
+    finally:
+        ring.close()
+        ring.unlink()
+    assert processes[0].returncode == 0
+    assert marker.read_text() == str(3 * 6)
