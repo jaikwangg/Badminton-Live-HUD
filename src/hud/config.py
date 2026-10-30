@@ -37,6 +37,7 @@ class SupervisorConfig:
     restart_backoff_initial_s: float = 0.5
     restart_backoff_max_s: float = 10.0
     restart_reset_after_s: float = 30.0
+    stop_grace_s: float = 5.0
     logs_dir: str = "logs"
     log_max_bytes: int = 10_000_000
     log_backups: int = 3

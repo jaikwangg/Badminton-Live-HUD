@@ -12,6 +12,9 @@ from hud.bus.messages import Frame
 
 _HEADER = struct.Struct("<QqHHQ")  # frame_id, capture ts, width, height, seqlock seq
 _HEADER_SIZE = _HEADER.size
+_FIELDS = struct.Struct("<QqHH")  # the header minus seq, which is stored on its own
+_SEQ_OFFSET = _FIELDS.size
+_SEQ = struct.Struct("<Q")
 _HAS_TRACK_ARG = sys.version_info >= (3, 13)
 _POSIX = os.name == "posix"
 
@@ -70,13 +73,39 @@ class SharedFrameRing:
         frame_id = self._latest_frame_id() + 1
         slot = frame_id % self.slots
         offset = slot * self.slot_size
-        previous_seq = _HEADER.unpack_from(self.shm.buf, offset)[4]
+        previous_seq = self._seq(offset)
         odd_seq = previous_seq + 1 if previous_seq % 2 == 0 else previous_seq + 2
-        _HEADER.pack_into(self.shm.buf, offset, frame_id, ts, self.width, self.height, odd_seq)
+        # seq goes odd before anything else changes and even only after everything is written.
+        self._set_seq(offset, odd_seq)
+        _FIELDS.pack_into(self.shm.buf, offset, frame_id, ts, self.width, self.height)
         start = offset + _HEADER_SIZE
         self.shm.buf[start : start + len(image)] = image
-        _HEADER.pack_into(self.shm.buf, offset, frame_id, ts, self.width, self.height, odd_seq + 1)
+        self._set_seq(offset, odd_seq + 1)
         return frame_id
+
+    def _seq(self, offset: int) -> int:
+        return _SEQ.unpack_from(self.shm.buf, offset + _SEQ_OFFSET)[0]
+
+    def _set_seq(self, offset: int, seq: int) -> None:
+        # Not struct.pack_into: it zero-fills its target first, so readers would briefly see
+        # seq 0 (even). That, applied to the whole header, was the torn-header bug.
+        start = offset + _SEQ_OFFSET
+        self.shm.buf[start : start + _SEQ.size] = seq.to_bytes(_SEQ.size, "little")
+
+    def _read_slot(self, index: int, newer_than: int) -> Frame | None:
+        """Copy one slot if it holds a complete frame newer than ``newer_than``, else None."""
+        offset = index * self.slot_size
+        seq = self._seq(offset)
+        if seq % 2:
+            return None
+        frame_id, ts, width, height = _FIELDS.unpack_from(self.shm.buf, offset)
+        if frame_id <= newer_than or (width, height) != (self.width, self.height):
+            return None
+        start = offset + _HEADER_SIZE
+        image = bytes(self.shm.buf[start : start + width * height * 3])
+        if self._seq(offset) != seq:
+            return None
+        return Frame(frame_id, ts, width, height, image)
 
     def _latest_frame_id(self) -> int:
         newest = 0
@@ -89,21 +118,18 @@ class SharedFrameRing:
     def read_latest(self, retries: int = 3) -> Frame | None:
         """Read the latest stable image, dropping retries when a writer is active."""
         for _ in range(retries):
-            candidates: list[tuple[int, int, int, int, int]] = []
+            newest, slot = 0, -1
             for index in range(self.slots):
                 offset = index * self.slot_size
-                header = _HEADER.unpack_from(self.shm.buf, offset)
-                if header[0] and header[4] % 2 == 0:
-                    candidates.append((*header, index))
-            if not candidates:
+                if self._seq(offset) % 2 == 0:
+                    frame_id = _FIELDS.unpack_from(self.shm.buf, offset)[0]
+                    if frame_id > newest:
+                        newest, slot = frame_id, index
+            if slot < 0:
                 return None
-            frame_id, ts, width, height, seq, slot = max(candidates, key=lambda item: item[0])
-            offset = slot * self.slot_size
-            start = offset + _HEADER_SIZE
-            image = bytes(self.shm.buf[start : start + width * height * 3])
-            check = _HEADER.unpack_from(self.shm.buf, offset)
-            if check[4] == seq and seq % 2 == 0 and check[0] == frame_id:
-                return Frame(frame_id, ts, width, height, image)
+            frame = self._read_slot(slot, 0)
+            if frame is not None:
+                return frame
         return None
 
     def read_since(self, frame_id: int) -> list[Frame]:
@@ -111,19 +137,8 @@ class SharedFrameRing:
 
         A slot the writer reuses mid-copy is skipped; it holds a newer frame for the next call.
         """
-        frames: list[Frame] = []
-        for index in range(self.slots):
-            offset = index * self.slot_size
-            slot_id, ts, width, height, seq = _HEADER.unpack_from(self.shm.buf, offset)
-            if not slot_id or seq % 2 or slot_id <= frame_id:
-                continue
-            start = offset + _HEADER_SIZE
-            image = bytes(self.shm.buf[start : start + width * height * 3])
-            check = _HEADER.unpack_from(self.shm.buf, offset)
-            if check[4] == seq and check[0] == slot_id:
-                frames.append(Frame(slot_id, ts, width, height, image))
-        frames.sort(key=lambda frame: frame.frame_id)
-        return frames
+        frames = [self._read_slot(index, frame_id) for index in range(self.slots)]
+        return sorted((f for f in frames if f is not None), key=lambda f: f.frame_id)
 
     def close(self) -> None:
         self.shm.close()

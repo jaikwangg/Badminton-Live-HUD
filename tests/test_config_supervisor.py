@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 import sys
 import threading
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from hud import config as hud_config
+from hud import supervisor as supervisor_module
 from hud.config import AppConfig, BusConfig, SupervisorConfig, endpoint, load_config
 from hud.supervisor import Supervisor, next_restart_delay, resolve_command
 
@@ -268,3 +270,57 @@ def test_exit_is_logged_with_code_and_restarted_with_backoff(tmp_path: Path) -> 
     finally:
         supervisor.stop()
         runner.join(timeout=2)
+
+
+SLEEP_COMMAND = ["python", "-c", "import time; time.sleep(60)"]
+
+
+def _sleepers(count: int) -> AppConfig:
+    workers = {
+        f"w{index}": {"enabled": True, "heartbeat": False, "command": SLEEP_COMMAND}
+        for index in range(count)
+    }
+    return AppConfig(workers=workers, supervisor=SupervisorConfig(stop_grace_s=2))
+
+
+def test_stop_terminates_every_child() -> None:
+    supervisor = Supervisor(_sleepers(3))
+    supervisor.start()
+    processes = [worker.process for worker in supervisor._workers.values()]
+    assert all(process is not None and process.poll() is None for process in processes)
+    supervisor.stop()
+    assert all(process is not None and process.poll() is not None for process in processes)
+    supervisor.stop()  # idempotent: main() may reach it after run() already stopped
+
+
+def test_children_join_kill_on_close_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, object]] = []
+    monkeypatch.setattr(supervisor_module, "_create_job", lambda: "job")
+    monkeypatch.setattr(
+        supervisor_module, "_assign_to_job", lambda job, process: calls.append((job, process.pid))
+    )
+    monkeypatch.setattr(supervisor_module, "_close_job", lambda job: calls.append(("close", job)))
+    supervisor = Supervisor(_sleepers(2))
+    supervisor.start()
+    pids = [worker.process.pid for worker in supervisor._workers.values()]
+    supervisor.stop()
+    assert calls == [("job", pids[0]), ("job", pids[1]), ("close", "job")]
+
+
+def test_parent_death_signal_uses_prctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(supervisor_module, "_PRCTL", lambda *args: calls.append(args) or 0)
+    supervisor_module._set_parent_death_signal()
+    assert calls == [(1, signal.SIGTERM, 0, 0, 0)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Job Objects are Windows-only")
+def test_closing_job_kills_children_like_a_supervisor_death() -> None:
+    supervisor = Supervisor(_sleepers(1))
+    assert supervisor._job is not None
+    supervisor.start()
+    process = supervisor._workers["w0"].process
+    supervisor_module._close_job(supervisor._job)  # what the OS does when the supervisor dies
+    supervisor._job = None
+    process.wait(timeout=5)
+    supervisor.stop()

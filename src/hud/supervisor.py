@@ -2,21 +2,122 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import queue
+import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from hud.config import AppConfig, SupervisorConfig, load_config
 
 logger = logging.getLogger(__name__)
+
+# Parent-death safeguards, so a hard-killed supervisor (taskkill /F, SIGKILL) takes its
+# children with it instead of leaving them running with ports bound.
+_PR_SET_PDEATHSIG = 1
+# Resolved in the parent: the child only calls it between fork and exec.
+_PRCTL: Callable[..., int] | None = None
+if sys.platform.startswith("linux"):
+    try:
+        _PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        _PRCTL = None
+
+
+def _set_parent_death_signal() -> None:
+    """preexec_fn: deliver SIGTERM to this child when the supervisor dies (Linux only).
+
+    Grandchildren (the recorder's ffmpeg) are not covered; they exit when their pipe closes.
+    """
+    if _PRCTL is not None:
+        _PRCTL(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+
+
+class _IoCounters(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in ("r_ops", "w_ops", "o_ops", "r", "w", "o")]
+
+
+class _BasicLimits(ctypes.Structure):  # JOBOBJECT_BASIC_LIMIT_INFORMATION
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _ExtendedLimits(ctypes.Structure):  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    _fields_ = [
+        ("BasicLimitInformation", _BasicLimits),
+        ("IoInfo", _IoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+
+def _create_job() -> Any:
+    """Windows: a Job Object whose processes die when its last handle closes; else None.
+
+    The handle is held until the supervisor exits, so any exit, even taskkill /F, kills the
+    whole job, including grandchildren (they join their parent's job automatically).
+    """
+    if sys.platform != "win32":
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        logger.warning(
+            "CreateJobObject failed (%d); children may outlive a killed supervisor",
+            ctypes.get_last_error(),
+        )
+        return None
+    info = _ExtendedLimits()
+    info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(
+        ctypes.c_void_p(job),
+        _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        logger.warning("SetInformationJobObject failed (%d)", ctypes.get_last_error())
+        kernel32.CloseHandle(ctypes.c_void_p(job))
+        return None
+    return job
+
+
+def _assign_to_job(job: Any, process: subprocess.Popen[str]) -> None:
+    # ponytail: a child that spawns before this call leaves that grandchild outside the job;
+    # workers spawn nothing at startup. Upgrade to CREATE_SUSPENDED + resume if that changes.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = ctypes.c_void_p(int(process._handle))  # type: ignore[attr-defined]
+    if not kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), handle):
+        logger.warning("AssignProcessToJobObject failed (%d)", ctypes.get_last_error())
+
+
+def _close_job(job: Any) -> None:
+    """Close the job handle, killing whatever is still in it."""
+    ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(job))
 
 
 def resolve_command(command: list[str]) -> list[str]:
@@ -54,6 +155,7 @@ class Supervisor:
         self._heartbeats: queue.Queue[tuple[str, float]] = queue.Queue(maxsize=256)
         self._workers: dict[str, WorkerProcess] = {}
         self._stopping = threading.Event()
+        self._job = _create_job()
 
     def _worker_log(self, name: str) -> logging.Logger:
         settings = self.config.supervisor
@@ -107,7 +209,10 @@ class Supervisor:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                preexec_fn=_set_parent_death_signal if _PRCTL is not None else None,
             )
+            if self._job is not None:
+                _assign_to_job(self._job, process)
         except (OSError, ValueError) as exc:
             worker.log.info("supervisor: failed to start %s: %s", worker.command, exc)
             worker.started_at = now
@@ -171,7 +276,7 @@ class Supervisor:
             now = time.monotonic()
             for name, worker in list(self._workers.items()):
                 if worker.process is None:
-                    if now >= worker.next_start_at:
+                    if now >= worker.next_start_at and not self._stopping.is_set():
                         self._start(name, worker)
                     continue
                 if worker.process.poll() is not None:
@@ -184,23 +289,29 @@ class Supervisor:
                 self._schedule_restart(name, worker, reason, code, now)
 
     def stop(self) -> None:
+        """Terminate every child, give them stop_grace_s together, then kill stragglers."""
         self._stopping.set()
+        for worker in self._workers.values():
+            if worker.process is not None and worker.process.poll() is None:
+                worker.process.terminate()
         for name, worker in self._workers.items():
             if worker.process is not None:
                 code = self._stop_worker(worker)
                 logger.info("stopped %s (exit code %s)", name, code)
             for handler in worker.log.handlers:
                 handler.close()
+        if self._job is not None:
+            _close_job(self._job)  # sweeps grandchildren still in the job (e.g. ffmpeg)
+            self._job = None
 
-    @staticmethod
-    def _stop_worker(worker: WorkerProcess) -> int | None:
+    def _stop_worker(self, worker: WorkerProcess) -> int | None:
         process = worker.process
         if process is None:
             return None
         if process.poll() is None:
             process.terminate()
             try:
-                process.wait(timeout=1)
+                process.wait(timeout=self.config.supervisor.stop_grace_s)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
@@ -231,9 +342,20 @@ def main() -> None:
         ],
     )
     supervisor = Supervisor(config)
+
+    def request_stop(signum: int, _frame: object) -> None:
+        logger.info("signal %d received; stopping", signum)
+        supervisor._stopping.set()  # run() returns; the finally below stops the children
+
+    # SIGINT keeps raising KeyboardInterrupt (Ctrl+C); SIGBREAK is Ctrl+Break on Windows.
+    for name in ("SIGTERM", "SIGBREAK", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), request_stop)
     try:
         supervisor.run()
     except KeyboardInterrupt:
+        pass
+    finally:
         supervisor.stop()
 
 
