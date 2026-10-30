@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import random
 import time
 from collections import deque
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
@@ -20,6 +19,10 @@ from hud.config import AppConfig, endpoint, load_config
 from hud.models.shuttle import ResizedFrame, ShuttleTracker, create_shuttle_tracker
 
 LOGGER = logging.getLogger(__name__)
+
+# ponytail: config/default.yaml is owned by T01; this should become
+# models.shuttle.background_sample_span_s. Until then the first background takes ~10 s.
+BACKGROUND_SAMPLE_SPAN_S = 10.0
 
 
 class Publisher(Protocol):
@@ -48,7 +51,7 @@ class ZmqPublisher:
 
 
 class MedianBackground:
-    """Build a reservoir-sampled RGB median off the frame-processing thread."""
+    """Build an RGB median of time-spaced frames off the frame-processing thread."""
 
     def __init__(
         self,
@@ -56,13 +59,15 @@ class MedianBackground:
         height: int,
         sample_count: int,
         update_interval_s: float,
+        sample_span_s: float = BACKGROUND_SAMPLE_SPAN_S,
     ) -> None:
-        if sample_count < 1 or update_interval_s <= 0:
+        if sample_count < 1 or update_interval_s <= 0 or sample_span_s < 0:
             raise ValueError("Background sample count and update interval must be positive")
         self.width = width
         self.height = height
         self.sample_count = sample_count
         self.update_interval_s = update_interval_s
+        self.sample_span_s = sample_span_s
         self._frames: Queue[Frame] = Queue(maxsize=1)
         self._stop = Event()
         self._thread: Thread | None = None
@@ -110,9 +115,10 @@ class MedianBackground:
         return np.asarray(resized, dtype=np.uint8).copy()
 
     def _run(self) -> None:
-        rng = random.Random()
-        reservoir: list[Frame] = []
-        seen = 0
+        # Frames spaced sample_span_s / sample_count apart by capture ts, so players who
+        # move within the span drop out of the median (consecutive frames kept them in).
+        samples: deque[Frame] = deque(maxlen=self.sample_count)
+        stride_ns = int(self.sample_span_s * 1e9 / self.sample_count)
         last_update = 0.0
         source_shape: tuple[int, int] | None = None
         while not self._stop.is_set():
@@ -122,27 +128,22 @@ class MedianBackground:
                 continue
             current_shape = (frame.height, frame.width)
             if source_shape is not None and current_shape != source_shape:
-                reservoir.clear()
-                seen = 0
+                samples.clear()
                 self._background = None
                 last_update = 0.0
             source_shape = current_shape
 
-            seen += 1
-            if len(reservoir) < self.sample_count:
-                reservoir.append(frame)
-            else:
-                replacement = rng.randrange(seen)
-                if replacement < self.sample_count:
-                    reservoir[replacement] = frame
+            if samples and frame.ts - samples[-1].ts < stride_ns:
+                continue
+            samples.append(frame)
 
             now = time.monotonic()
-            if len(reservoir) < self.sample_count or (
+            if len(samples) < self.sample_count or (
                 self._background is not None and now - last_update < self.update_interval_s
             ):
                 continue
             try:
-                self._background = self._make_background(reservoir.copy())
+                self._background = self._make_background(list(samples))
                 last_update = now
             except Exception:
                 LOGGER.exception("Failed to update shuttle median background")

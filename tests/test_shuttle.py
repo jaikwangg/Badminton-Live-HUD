@@ -111,9 +111,12 @@ def test_model_input_is_background_then_eight_rgb_frames_in_27_channels() -> Non
     tracker = TrackNetV3Tracker("unused.onnx", "onnxruntime", session=session, morph_kernel_size=1)
     background = np.zeros((288, 512, 3), dtype=np.uint8)
     background[0, 0] = [255, 128, 0]
-    frames = [_resized_frame(i + 1, value=10 * (i + 1)) for i in range(8)]
-    frames[0].image_rgb[0, 0] = [0, 64, 128]
-    frames[-1].image_rgb[0, 0] = [24, 48, 96]
+    images = [np.full((288, 512, 3), 10 * (i + 1), dtype=np.uint8) for i in range(8)]
+    images[0][0, 0] = [0, 64, 128]
+    images[-1][0, 0] = [24, 48, 96]
+    frames = [
+        ResizedFrame(i + 1, (i + 1) * 1000, 1920, 1080, image) for i, image in enumerate(images)
+    ]
 
     tensor = tracker._input_tensor(frames, background)
 
@@ -121,6 +124,60 @@ def test_model_input_is_background_then_eight_rgb_frames_in_27_channels() -> Non
     np.testing.assert_allclose(tensor[0, :3, 0, 0], [1.0, 128 / 255, 0.0])
     np.testing.assert_allclose(tensor[0, 3:6, 0, 0], [0.0, 64 / 255, 128 / 255])
     np.testing.assert_allclose(tensor[0, 24:27, 0, 0], [24 / 255, 48 / 255, 96 / 255])
+
+
+def _reference_input_tensor(frames: Sequence[ResizedFrame], background: np.ndarray) -> np.ndarray:
+    """The pre-cache implementation: transpose and concatenate all 9 images per call."""
+    tensors = [background.transpose(2, 0, 1)]
+    tensors += [frame.image_rgb.transpose(2, 0, 1) for frame in frames]
+    return np.concatenate(tensors, axis=0)[None, ...].astype(np.float32) / 255.0
+
+
+def test_cached_input_tensor_matches_reference_on_random_frames() -> None:
+    rng = np.random.default_rng(6)
+    tracker = TrackNetV3Tracker("unused.onnx", "onnxruntime", session=FakeSession())
+    background = rng.integers(0, 256, (288, 512, 3), dtype=np.uint8)
+    for step in range(3):
+        if step == 2:
+            # A new background array must replace the cached background channels.
+            background = rng.integers(0, 256, (288, 512, 3), dtype=np.uint8)
+        frames = [
+            ResizedFrame(i, i, 1920, 1080, rng.integers(0, 256, (288, 512, 3), dtype=np.uint8))
+            for i in range(8)
+        ]
+        np.testing.assert_allclose(
+            tracker._input_tensor(frames, background),
+            _reference_input_tensor(frames, background),
+            rtol=0,
+            atol=1e-7,
+        )
+
+
+def test_background_median_uses_frames_spaced_across_the_span() -> None:
+    background = shuttle_worker.MedianBackground(8, 4, 3, 60.0, sample_span_s=3.0).start()
+    try:
+        # One frame every 0.5 s; the 1 s stride keeps frames 0, 2 and 4 (values 0, 20, 40).
+        for index in range(5):
+            frame = Frame(
+                frame_id=index,
+                ts=index * 500_000_000,
+                width=8,
+                height=4,
+                image=bytes([index * 10]) * (8 * 4 * 3),
+            )
+            background.submit(frame)
+            while not background._frames.empty():
+                Event().wait(0.001)
+        for _ in range(2000):
+            if background.get() is not None:
+                break
+            Event().wait(0.001)
+        image = background.get()
+    finally:
+        background.close()
+
+    assert image is not None
+    assert int(image[0, 0, 0]) == 20  # Consecutive frames 0, 1, 2 would give 10.
 
 
 def test_infer_uses_last_of_eight_heatmaps_and_maps_pixel_centers() -> None:
