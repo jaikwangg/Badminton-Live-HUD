@@ -1,8 +1,11 @@
 """Shuttlecock Kalman filter for 2D position/velocity tracking and state estimation.
 
 According to CONTRACTS and T08:
-- If shuttle is missed for <= 10 frames: status is 'predicted' with estimated coordinates.
-- If shuttle is missed for > 10 frames: status transitions to 'lost' with None coordinates.
+- Missed for up to 10 frames (~167 ms at a nominal 60 fps): status is 'predicted'.
+- Missed for longer: status transitions to 'lost' with None coordinates.
+
+Both are measured in time from the last accepted detection, not in messages, because the
+shuttle worker publishes only inferred frames and their spacing follows inference speed.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ class ShuttleKalmanFilter:
 
     def __init__(
         self,
-        max_predicted_frames: int = 10,
+        predict_ms: float = 167.0,
         process_noise_std: float = 120.0,
         measurement_noise_std: float = 4.0,
         direction_change_deg: float = 55.0,
@@ -45,7 +48,8 @@ class ShuttleKalmanFilter:
         self.max_px_per_s = max_px_per_s
         self.max_jump_frames = max_jump_frames
         self._jump_frames = 0
-        self.max_predicted_frames = max_predicted_frames
+        # Proposed config key for T01: `fusion.shuttle.predict_ms` (10 frames at 60 fps).
+        self.predict_ns = int(predict_ms * 1_000_000)
         self.process_noise_std = process_noise_std
         self.measurement_noise_std = measurement_noise_std
         self.direction_change_rad = math.radians(direction_change_deg)
@@ -62,7 +66,6 @@ class ShuttleKalmanFilter:
         self._r = np.eye(2, dtype=np.float64) * (measurement_noise_std**2)
 
         self._initialized = False
-        self._missed_frames = 0
         self._last_ts: int | None = None
         self._prev_velocity = (0.0, 0.0)
         self._last_observation: tuple[float, float] | None = None
@@ -79,7 +82,6 @@ class ShuttleKalmanFilter:
         self._x = np.zeros(4, dtype=np.float64)
         self._p = np.diag([50.0, 50.0, 1_000_000.0, 1_000_000.0]).astype(np.float64)
         self._initialized = False
-        self._missed_frames = 0
         self._last_ts = None
         self._prev_velocity = (0.0, 0.0)
         self._last_observation = None
@@ -91,10 +93,8 @@ class ShuttleKalmanFilter:
         if self._last_ts is None or ts <= self._last_ts:
             dt = 1.0 / 60.0
         else:
+            # Real spacing: messages arrive at inference rate, not at the camera frame rate.
             dt = (ts - self._last_ts) / 1_000_000_000.0
-            # Guard against extreme delta times
-            if dt > 0.5 or dt <= 0:
-                dt = 1.0 / 60.0
         self._last_ts = ts
         return dt
 
@@ -183,7 +183,6 @@ class ShuttleKalmanFilter:
                 self._x = np.array([zx, zy, 0.0, 0.0], dtype=np.float64)
                 self._p = np.diag([10.0, 10.0, 1_000_000.0, 1_000_000.0]).astype(np.float64)
                 self._initialized = True
-                self._missed_frames = 0
                 self.status = "tracked"
                 self._prev_velocity = (0.0, 0.0)
                 self._last_observation = (zx, zy)
@@ -227,7 +226,6 @@ class ShuttleKalmanFilter:
 
             self._jump_frames = 0
             self._update(z)
-            self._missed_frames = 0
             self.status = "tracked"
 
             curr_vel = (float(self._x[2]), float(self._x[3]))
@@ -257,12 +255,11 @@ class ShuttleKalmanFilter:
             )
 
         self._predict(dt)
-        self._missed_frames += 1
 
         curr_vel = (float(self._x[2]), float(self._x[3]))
         speed = math.hypot(curr_vel[0], curr_vel[1])
 
-        if self._missed_frames <= self.max_predicted_frames:
+        if self.last_seen_ts is not None and ts - self.last_seen_ts <= self.predict_ns:
             self.status = "predicted"
             # In predicted state, direction change from a missing measurement is not confirmed
             return ShuttleTrackResult(
@@ -273,7 +270,7 @@ class ShuttleKalmanFilter:
                 direction_changed=False,
             )
 
-        # Missed for more than max_predicted_frames (10 frames) -> lost
+        # Unseen for longer than predict_ms -> lost
         self.status = "lost"
         return ShuttleTrackResult(
             status="lost",

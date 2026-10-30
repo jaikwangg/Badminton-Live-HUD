@@ -14,7 +14,7 @@ from hud.fusion.stats import ShotDetector, ShotInfo, drag_speed_kmh_est
 
 
 def test_kalman_tracked_state_updates_smoothly() -> None:
-    kf = ShuttleKalmanFilter(max_predicted_frames=10)
+    kf = ShuttleKalmanFilter()
     ts_start = 1_000_000_000
     dt_ns = 16_666_667  # ~60 fps
 
@@ -33,7 +33,7 @@ def test_kalman_tracked_state_updates_smoothly() -> None:
 
 
 def test_kalman_transitions_to_predicted_for_up_to_10_frames_then_lost() -> None:
-    kf = ShuttleKalmanFilter(max_predicted_frames=10)
+    kf = ShuttleKalmanFilter()
     ts = 1_000_000_000
     dt_ns = 16_666_667
 
@@ -325,17 +325,19 @@ def test_rally_fsm_shuttle_lost_during_rally_concludes_rally() -> None:
 
 def test_rally_fsm_end_returns_to_idle_and_next_serve_starts_new_rally() -> None:
     fsm = RallyFSM()
-    fsm.on_shot(ShotInfo(ts=1_000, by=0, speed_kmh_est=None))  # IDLE -> RALLY directly
+    ms = 1_000_000
+    fsm.on_shot(ShotInfo(ts=1_000 * ms, by=0, speed_kmh_est=None))  # IDLE -> RALLY directly
     assert fsm.state == RallyState.RALLY
-    fsm.end_rally(2_000)
-    fsm.end_rally(3_000)  # ignored when not active
+    fsm.on_shuttle_update("tracked", [1.0, 1.0], 1_500 * ms)
+    fsm.end_rally(2_000 * ms)
+    fsm.end_rally(3_000 * ms)  # ignored when not active
     assert sum(e["kind"] == "rally_end" for e in fsm.drain_events()) == 1
     fsm.reset_to_idle()
     assert fsm.state == RallyState.IDLE
-    fsm.start_serve(4_000)
+    fsm.start_serve(4_000 * ms)
     assert (fsm.state, fsm.rally_n, fsm.shots_count) == (RallyState.SERVE, 2, 0)
-    fsm.end_rally(5_000)  # SERVE -> END
-    fsm.start_rally(6_000)  # END -> SERVE -> RALLY
+    fsm.end_rally(5_000 * ms)  # SERVE -> END
+    fsm.start_rally(6_000 * ms)  # END -> SERVE -> RALLY
     assert (fsm.state, fsm.rally_n) == (RallyState.RALLY, 3)
 
 
@@ -366,19 +368,70 @@ def test_rally_fsm_shots_alternate_sides_keeping_stronger_evidence() -> None:
 def test_rally_end_estimates_landing_from_last_seen_point_via_homography() -> None:
     identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     fsm = RallyFSM(mode="doubles", homography=identity)
-    fsm.on_shot(ShotInfo(ts=1_000, by=1, speed_kmh_est=None, side=0, team=0))
-    fsm.on_shuttle_update("tracked", [9.0, 3.0], 2_000)
+    ms = 1_000_000
+    fsm.on_shot(ShotInfo(ts=1_000 * ms, by=1, speed_kmh_est=None, side=0, team=0))
+    fsm.on_shuttle_update("tracked", [9.0, 3.0], 2_000 * ms)
     assert fsm.landing_xy_m_est is None  # null while the shuttle is in flight
-    fsm.on_shuttle_update("predicted", [9.5, 3.0], 3_000)  # predictions are not landings
-    fsm.end_rally(4_000)
+    fsm.on_shuttle_update("predicted", [9.5, 3.0], 3_000 * ms)  # predictions are not landings
+    fsm.end_rally(4_000 * ms)
 
     assert fsm.landing_xy_m_est == [9.0, 3.0]
     suggestion = fsm.drain_events()[-1]["data"]
     assert suggestion["suggested_side"] == 0
     assert suggestion["suggested_team"] == 0
 
-    fsm.start_serve(5_000)
+    fsm.start_serve(5_000 * ms)
     assert fsm.landing_xy_m_est is None
+
+
+def test_rally_end_drops_landing_far_outside_court() -> None:
+    identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    ms = 1_000_000
+    for point, expected in (
+        ([15.42, 2.78], None),
+        ([20.36, 2.09], None),
+        ([14.0, 3.0], [14.0, 3.0]),
+    ):
+        fsm = RallyFSM(homography=identity)
+        fsm.on_shot(ShotInfo(ts=1_000 * ms, by=0, speed_kmh_est=None, side=0))
+        fsm.on_shuttle_update("tracked", point, 2_000 * ms)
+        fsm.end_rally(3_000 * ms)
+        assert fsm.landing_xy_m_est == expected
+    fsm.reset_to_idle()
+    assert fsm.landing_xy_m_est is None
+
+
+def test_rally_without_shot_or_duration_ends_silently() -> None:
+    ms = 1_000_000
+    fsm = RallyFSM()
+    fsm.start_serve(1_000 * ms)
+    fsm.drain_events()
+    fsm.end_rally(2_000 * ms)  # no shot
+    assert fsm.state == RallyState.END
+    assert fsm.drain_events() == []
+
+    # A shot but the shuttle never seen after it: t_ms would be 0.
+    fsm.on_shot(ShotInfo(ts=3_000 * ms, by=0, speed_kmh_est=None))
+    fsm.drain_events()
+    fsm.on_shuttle_update("lost", None, 5_000 * ms)
+    assert fsm.state == RallyState.END
+    assert fsm.drain_events() == []
+
+
+def test_kalman_predicted_and_lost_follow_time_not_message_count() -> None:
+    # Inference publishes every 50 ms: 3 misses (150 ms) are predicted, the 4th (200 ms) is lost.
+    kf = ShuttleKalmanFilter()
+    step = 50_000_000
+    for i in range(5):
+        res = kf.update(True, [100.0 + i * 50.0, 200.0], i * step)  # 1000 px/s
+    assert abs(res.velocity[0] - 1000.0) < 150.0  # real dt, not 1/60 s
+    statuses = [kf.update(False, None, (4 + k) * step).status for k in range(1, 5)]
+    assert statuses == ["predicted", "predicted", "predicted", "lost"]
+
+    kf = ShuttleKalmanFilter(predict_ms=300.0)
+    kf.update(True, [100.0, 200.0], 0)
+    assert kf.update(False, None, 250_000_000).status == "predicted"
+    assert kf.update(False, None, 350_000_000).status == "lost"
 
 
 def test_kalman_rejects_jumps_for_at_most_three_frames() -> None:

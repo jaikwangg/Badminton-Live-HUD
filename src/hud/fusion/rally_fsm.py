@@ -37,6 +37,7 @@ class RallyFSM:
         mode: str = "singles",
         homography: list[list[float]] | None = None,
         end_gap_ms: float = 1800.0,
+        landing_margin_m: float = 1.0,
     ) -> None:
         if mode not in {"singles", "doubles"}:
             raise ValueError("mode must be 'singles' or 'doubles'")
@@ -45,6 +46,8 @@ class RallyFSM:
         self.homography = homography
         # A rally ends only after the shuttle stays unseen this long (LESSONS 6: 1.8 s).
         self.end_gap_ns = int(end_gap_ms * 1_000_000)
+        # Landings further than this outside the court are homography/detection errors.
+        self.landing_margin_m = landing_margin_m
         self.state: RallyState = RallyState.IDLE
         self.rally_n: int = 0
         self.shots_count: int = 0
@@ -175,6 +178,9 @@ class RallyFSM:
         # Duration runs to the last sighting, not to the moment the loss was confirmed.
         last_ts = max(self.start_ts, min(ts, self.last_seen_ts))
         self.current_t_ms = (last_ts - self.start_ts) // 1_000_000
+        # A rally with no shot or no time after it is a false start: end it silently.
+        if self.shots_count == 0 or self.current_t_ms == 0:
+            return
 
         self._pending_events.append(
             {
@@ -207,9 +213,13 @@ class RallyFSM:
         if self.homography is None or self.last_seen_px is None:
             return None
         try:
-            return transform_point(self.homography, self.last_seen_px)
+            lx, ly = transform_point(self.homography, self.last_seen_px)
         except ValueError:
             return None
+        m = self.landing_margin_m
+        if not (-m <= lx <= self.COURT_LENGTH_M + m and -m <= ly <= self.COURT_WIDTH_M + m):
+            return None
+        return [lx, ly]
 
     def _evaluate_point_suggestion(
         self,
