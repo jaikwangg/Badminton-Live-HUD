@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>Operator Console</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&amp;family=IBM+Plex+Sans+Thai:wght@400;500;600&amp;family=JetBrains+Mono:wght@400&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#3fd0f0}a:hover{color:#8fe6f8}
+.num{font-family:'Barlow Condensed',sans-serif;font-variant-numeric:tabular-nums}
+.lb{font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#a3b6cb}
+.card{background:#101a28;border:1px solid #23344a;border-radius:8px;box-sizing:border-box}
+.fld{background:#0a121d;border:1px solid #2a3d55;border-radius:6px;color:#eef3f8;font:inherit;font-size:15px;padding:8px 10px;box-sizing:border-box;min-height:40px}
+.btn{font:inherit;font-size:15px;font-weight:600;border-radius:6px;padding:10px 18px;min-height:44px;cursor:pointer;border:1px solid #2a3d55;background:#16233a;color:#eef3f8}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; box-sizing: border-box; padding: 28px 32px; background: #0a111b; color: #eef3f8; font-family: 'IBM Plex Sans Thai', sans-serif; display: flex; flex-direction: column; gap: 20px">
+
+<div style="display: flex; align-items: center; gap: 16px">
+<h1 style="margin: 0; font-size: 26px; font-weight: 600">Badminton Live · ศูนย์ควบคุม</h1>
+<span style="display: flex; align-items: center; gap: 8px; font-size: 14px; color: #4be3a0; border: 1px solid #2c6b52; border-radius: 999px; padding: 4px 12px"><span style="width: 8px; height: 8px; border-radius: 50%; background: #4be3a0"></span>กำลังทำงาน</span>
+<span style="font-size: 13px; color: #a3b6cb; border: 1px solid #2a3d55; border-radius: 3px; padding: 1px 8px">ข้อมูลจำลอง</span>
+<div style="margin-left: auto; display: flex; gap: 10px">
+<button class="btn" type="button">เริ่มแรลลี่ใหม่</button>
+<button class="btn" type="button">แก้คะแนน</button>
+<button class="btn" type="button" style="background: #e5384b; border-color: #e5384b">หยุดระบบ</button>
+</div>
+</div>
+
+<div style="flex: 1; min-height: 0; display: grid; grid-template-columns: 860px minmax(0, 1fr); gap: 20px">
+
+<div style="display: flex; flex-direction: column; gap: 20px; min-height: 0">
+<div class="card" style="padding: 16px 18px; display: flex; flex-direction: column; gap: 12px">
+<div style="display: flex; align-items: center; gap: 12px">
+<span class="lb">1 · คาลิเบรตคอร์ท</span>
+<span style="margin-left: auto; font-size: 14px; color: #4be3a0">คาลิเบรตแล้ว · reprojection error [x.x] px</span>
+</div>
+<div style="position: relative; width: 822px; height: 420px; background: #18222f; border-radius: 6px; overflow: hidden">
+<svg width="822" height="420" viewBox="0 0 822 420" style="position: absolute; left: 0; top: 0" aria-hidden="true">
+<rect x="0" y="120" width="822" height="300" fill="#143a63"></rect>
+<path d="M281 130 L541 130 L711 400 L111 400 Z" fill="#1b5088" stroke="#e8f0f8" stroke-width="2"></path>
+<path d="M226 210 L596 210" stroke="#f4f7fb" stroke-width="3"></path>
+<path d="M411 130 L411 175 M411 245 L411 400 M253 175 L569 175 M196 245 L626 245" stroke="#e8f0f8" stroke-opacity="0.6" stroke-width="1.5" fill="none"></path>
+<path d="M281 130 L541 130 L711 400 L111 400 Z" fill="none" stroke="#ffd75a" stroke-width="2" stroke-dasharray="6 5"></path>
+<circle cx="281" cy="130" r="9" fill="#0a111b" stroke="#ffd75a" stroke-width="3"></circle>
+<circle cx="541" cy="130" r="9" fill="#0a111b" stroke="#ffd75a" stroke-width="3"></circle>
+<circle cx="711" cy="400" r="9" fill="#0a111b" stroke="#ffd75a" stroke-width="3"></circle>
+<circle cx="111" cy="400" r="9" fill="#0a111b" stroke="#ffd75a" stroke-width="3"></circle>
+</svg>
+<span class="num" style="position: absolute; left: 252px; top: 96px; font-size: 18px; color: #ffd75a">1</span>
+<span class="num" style="position: absolute; left: 558px; top: 96px; font-size: 18px; color: #ffd75a">2</span>
+<span class="num" style="position: absolute; left: 726px; top: 366px; font-size: 18px; color: #ffd75a">3</span>
+<span class="num" style="position: absolute; left: 84px; top: 366px; font-size: 18px; color: #ffd75a">4</span>
+<span style="position: absolute; left: 14px; top: 12px; font-size: 13px; color: #a3b6cb; background: rgba(8,15,26,.8); padding: 3px 8px; border-radius: 4px">ลากจุด 1–4 ไปวางที่มุมคอร์ทคู่ · ภาพนิ่งจากกล้อง</span>
+</div>
+<div style="display: flex; gap: 10px">
+<button class="btn" type="button">จับเส้นคอร์ทอัตโนมัติ</button>
+<button class="btn" type="button">รีเซ็ตจุด</button>
+<span style="margin-left: auto; align-self: center; font-size: 14px; color: #a3b6cb">ต้องทำใหม่ทุกครั้งที่ขยับกล้อง</span>
+</div>
+</div>
+
+<div class="card" style="padding: 16px 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px">
+<div style="grid-column: 1 / -1"><span class="lb">2 · แหล่งภาพ</span></div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="src" style="font-size: 14px; color: #a3b6cb">กล้อง</label>
+<select id="src" class="fld"><option>มือถือ · SRT (Larix)</option><option>มือถือ · USB (DroidCam)</option><option>กล้อง USB</option></select>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="res" style="font-size: 14px; color: #a3b6cb">ความละเอียด / fps</label>
+<select id="res" class="fld"><option>1080p · 60 fps</option><option>720p · 120 fps</option></select>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px">
+<label for="mic" style="font-size: 14px; color: #a3b6cb">ไมค์ (จับเสียงตีลูก)</label>
+<select id="mic" class="fld"><option>ไมค์จากสตรีมมือถือ</option><option>ไมค์ USB ข้างคอร์ท</option></select>
+</div>
+</div>
+</div>
+
+<div style="display: flex; flex-direction: column; gap: 20px; min-height: 0">
+<div class="card" style="padding: 16px 18px; display: flex; flex-direction: column; gap: 10px">
+<span class="lb">3 · ผู้เล่น</span>
+<div style="display: grid; grid-template-columns: 14px minmax(0, 1fr) 96px 108px 52px; gap: 8px 10px; align-items: center; font-size: 13px; color: #a3b6cb">
+<span></span><span>ชื่อ</span><span>ฝั่ง</span><span>สายวัดชีพจร</span><span>ID</span>
+</div>
+<div style="display: grid; grid-template-columns: 14px minmax(0, 1fr) 96px 108px 52px; gap: 8px 10px; align-items: center">
+<span style="width: 12px; height: 12px; border-radius: 50%; background: #3fd0f0"></span>
+<input class="fld" aria-label="ชื่อผู้เล่น 1" value="ต้น">
+<select class="fld" aria-label="ฝั่งผู้เล่น 1"><option>ทีมเรา</option><option>คู่แข่ง</option></select>
+<select class="fld" aria-label="สายวัดชีพจรผู้เล่น 1"><option>HRM-01</option><option>ไม่มี</option></select>
+<span class="num" style="font-size: 18px; color: #4be3a0">#1</span>
+<span style="width: 12px; height: 12px; border-radius: 50%; background: #4be3a0"></span>
+<input class="fld" aria-label="ชื่อผู้เล่น 2" value="เบล">
+<select class="fld" aria-label="ฝั่งผู้เล่น 2"><option>ทีมเรา</option><option>คู่แข่ง</option></select>
+<select class="fld" aria-label="สายวัดชีพจรผู้เล่น 2"><option>HRM-02</option><option>ไม่มี</option></select>
+<span class="num" style="font-size: 18px; color: #4be3a0">#2</span>
+<span style="width: 12px; height: 12px; border-radius: 50%; background: #b892ff"></span>
+<input class="fld" aria-label="ชื่อผู้เล่น 3" value="ฟ้า">
+<select class="fld" aria-label="ฝั่งผู้เล่น 3"><option>คู่แข่ง</option><option>ทีมเรา</option></select>
+<select class="fld" aria-label="สายวัดชีพจรผู้เล่น 3"><option>HRM-03</option><option>ไม่มี</option></select>
+<span class="num" style="font-size: 18px; color: #4be3a0">#3</span>
+<span style="width: 12px; height: 12px; border-radius: 50%; background: #ffc247"></span>
+<input class="fld" aria-label="ชื่อผู้เล่น 4" value="กอล์ฟ">
+<select class="fld" aria-label="ฝั่งผู้เล่น 4"><option>คู่แข่ง</option><option>ทีมเรา</option></select>
+<select class="fld" aria-label="สายวัดชีพจรผู้เล่น 4"><option>ไม่มี</option><option>HRM-04</option></select>
+<span class="num" style="font-size: 18px; color: #ffc247">สลับ?</span>
+</div>
+<button class="btn" type="button" style="align-self: flex-start">สลับ ID ผู้เล่น 3 ↔ 4</button>
+</div>
+
+<div class="card" style="padding: 16px 18px; display: flex; flex-direction: column; gap: 10px">
+<span class="lb">4 · โมเดล</span>
+<div style="display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; font-size: 15px">
+<span>ผู้เล่น · YOLO + ByteTrack</span><span class="num" style="font-size: 17px; color: #a3b6cb">[x.x] ms</span>
+<span>ลูกขนไก่ · TrackNetV3</span><span class="num" style="font-size: 17px; color: #a3b6cb">[x.x] ms</span>
+<span>เสียงตีลูก · onset detection</span><span class="num" style="font-size: 17px; color: #a3b6cb">[x.x] ms</span>
+</div>
+</div>
+
+<div class="card" style="padding: 16px 18px; display: flex; flex-direction: column; gap: 10px">
+<span class="lb">5 · เอาต์พุต</span>
+<label for="obs" style="font-size: 14px; color: #a3b6cb">OBS Browser Source</label>
+<div style="display: flex; gap: 8px">
+<input id="obs" class="fld" style="flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 14px" value="http://localhost:8080/overlay" readonly>
+<button class="btn" type="button">คัดลอก</button>
+</div>
+<div style="font-size: 14px; color: #a3b6cb">ข้อมูลสดผ่าน WebSocket · ws://localhost:8765</div>
+</div>
+</div>
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px">
+<div class="card" style="padding: 10px 16px"><div class="lb" style="font-size: 12px">Pipeline fps</div><div class="num" style="font-size: 26px; font-weight: 600">[60]</div></div>
+<div class="card" style="padding: 10px 16px"><div class="lb" style="font-size: 12px">End-to-end latency</div><div class="num" style="font-size: 26px; font-weight: 600">[xxx] ms</div></div>
+<div class="card" style="padding: 10px 16px"><div class="lb" style="font-size: 12px">GPU</div><div class="num" style="font-size: 26px; font-weight: 600">[xx]%</div></div>
+<div class="card" style="padding: 10px 16px"><div class="lb" style="font-size: 12px">Dropped frames</div><div class="num" style="font-size: 26px; font-weight: 600">[x]</div></div>
+<div class="card" style="padding: 10px 16px"><div class="lb" style="font-size: 12px">BLE devices</div><div class="num" style="font-size: 26px; font-weight: 600">3 / 4</div></div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

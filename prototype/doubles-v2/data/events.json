@@ -1,0 +1,749 @@
+{
+ "rallies": [
+  {
+   "n": 1,
+   "start": 3.13,
+   "end": 15.53,
+   "shots": [
+    {
+     "t": 3.433,
+     "frame": 103,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "track-start",
+     "speed_kmh": 145,
+     "D": 9.79,
+     "T": 0.817,
+     "xy": [
+      224.6,
+      424.8
+     ]
+    },
+    {
+     "t": 4.25,
+     "frame": 128,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": 52,
+     "D": 7.43,
+     "T": 1.25,
+     "xy": [
+      172.2,
+      418.8
+     ]
+    },
+    {
+     "t": 5.5,
+     "frame": 165,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "track",
+     "speed_kmh": 27,
+     "D": 7.13,
+     "T": 2.233,
+     "xy": [
+      70.5,
+      438.9
+     ]
+    },
+    {
+     "t": 7.733,
+     "frame": 232,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": 77,
+     "D": 8.31,
+     "T": 1.067,
+     "xy": [
+      202.0,
+      448.0
+     ]
+    },
+    {
+     "t": 8.8,
+     "frame": 264,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "track",
+     "speed_kmh": 45,
+     "D": 8.87,
+     "T": 2.1,
+     "xy": [
+      148.0,
+      376.1
+     ]
+    },
+    {
+     "t": 10.9,
+     "frame": 327,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": 97,
+     "D": 10.55,
+     "T": 1.46,
+     "xy": [
+      277.1,
+      384.6
+     ]
+    },
+    {
+     "t": 12.36,
+     "frame": 371,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "audio",
+     "speed_kmh": 89,
+     "D": 9.98,
+     "T": 1.39,
+     "xy": null
+    },
+    {
+     "t": 13.75,
+     "frame": 412,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      303.4,
+      446.3
+     ]
+    }
+   ]
+  },
+  {
+   "n": 2,
+   "start": 23.33,
+   "end": 26.9,
+   "shots": [
+    {
+     "t": 23.683,
+     "frame": 710,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": 90,
+     "D": 8.02,
+     "T": 0.85,
+     "xy": [
+      196.5,
+      480.1
+     ]
+    },
+    {
+     "t": 24.533,
+     "frame": 736,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "track",
+     "speed_kmh": 56,
+     "D": 8.67,
+     "T": 1.603,
+     "xy": [
+      154.3,
+      535.3
+     ]
+    },
+    {
+     "t": 26.136,
+     "frame": 784,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "audio-seen",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      68.9,
+      445.9
+     ]
+    }
+   ]
+  },
+  {
+   "n": 3,
+   "start": 35.46,
+   "end": 40.4,
+   "shots": [
+    {
+     "t": 35.764,
+     "frame": 1073,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "audio-seen",
+     "speed_kmh": 155,
+     "D": 11.27,
+     "T": 1.086,
+     "xy": [
+      130.8,
+      271.7
+     ]
+    },
+    {
+     "t": 36.85,
+     "frame": 1106,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": 98,
+     "D": 10.43,
+     "T": 1.417,
+     "xy": [
+      286.0,
+      386.2
+     ]
+    },
+    {
+     "t": 38.267,
+     "frame": 1148,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "track",
+     "speed_kmh": 78,
+     "D": 9.13,
+     "T": 1.3,
+     "xy": [
+      308.0,
+      421.5
+     ]
+    },
+    {
+     "t": 39.567,
+     "frame": 1187,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      163.9,
+      444.1
+     ]
+    }
+   ]
+  },
+  {
+   "n": 4,
+   "start": 48.05,
+   "end": 51.9,
+   "shots": [
+    {
+     "t": 48.35,
+     "frame": 1450,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 69,
+     "D": 5.94,
+     "T": 0.62,
+     "xy": [
+      193.8,
+      458.5
+     ]
+    },
+    {
+     "t": 48.97,
+     "frame": 1469,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 74,
+     "D": 8.64,
+     "T": 1.2,
+     "xy": [
+      149.9,
+      450.3
+     ]
+    },
+    {
+     "t": 50.17,
+     "frame": 1505,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 87,
+     "D": 6.63,
+     "T": 0.6,
+     "xy": [
+      479.9,
+      396.0
+     ]
+    },
+    {
+     "t": 50.77,
+     "frame": 1523,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 80,
+     "D": 6.89,
+     "T": 0.7,
+     "xy": [
+      356.3,
+      422.1
+     ]
+    },
+    {
+     "t": 51.47,
+     "frame": 1544,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      219.4,
+      592.2
+     ]
+    }
+   ]
+  },
+  {
+   "n": 5,
+   "start": 59.7,
+   "end": 61.9,
+   "shots": [
+    {
+     "t": 60.0,
+     "frame": 1800,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "track-start",
+     "speed_kmh": 106,
+     "D": 8.1,
+     "T": 0.733,
+     "xy": [
+      290.7,
+      435.8
+     ]
+    },
+    {
+     "t": 60.733,
+     "frame": 1822,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "track",
+     "speed_kmh": 81,
+     "D": 5.51,
+     "T": 0.467,
+     "xy": [
+      311.0,
+      507.8
+     ]
+    },
+    {
+     "t": 61.2,
+     "frame": 1836,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "track",
+     "speed_kmh": 98,
+     "D": 5.05,
+     "T": 0.333,
+     "xy": [
+      350.3,
+      499.6
+     ]
+    },
+    {
+     "t": 61.533,
+     "frame": 1846,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "track",
+     "speed_kmh": 64,
+     "D": 4.79,
+     "T": 0.467,
+     "xy": [
+      397.5,
+      539.6
+     ]
+    }
+   ]
+  },
+  {
+   "n": 6,
+   "start": 71.08,
+   "end": 72.7,
+   "shots": [
+    {
+     "t": 71.38,
+     "frame": 2141,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      256.3,
+      431.4
+     ]
+    },
+    {
+     "t": 71.77,
+     "frame": 2153,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 73,
+     "D": 5.61,
+     "T": 0.53,
+     "xy": [
+      277.2,
+      433.2
+     ]
+    },
+    {
+     "t": 72.3,
+     "frame": 2169,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      66.7,
+      471.2
+     ]
+    }
+   ]
+  },
+  {
+   "n": 7,
+   "start": 79.7,
+   "end": 81.8,
+   "shots": [
+    {
+     "t": 80.0,
+     "frame": 2400,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 49,
+     "D": 5.91,
+     "T": 0.87,
+     "xy": [
+      199.5,
+      479.1
+     ]
+    },
+    {
+     "t": 80.87,
+     "frame": 2426,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 71,
+     "D": 4.5,
+     "T": 0.38,
+     "xy": [
+      144.1,
+      421.4
+     ]
+    },
+    {
+     "t": 81.25,
+     "frame": 2438,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      259.0,
+      432.0
+     ]
+    }
+   ]
+  },
+  {
+   "n": 8,
+   "start": 98.08,
+   "end": 114.8,
+   "shots": [
+    {
+     "t": 98.38,
+     "frame": 2951,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 152,
+     "D": 6.16,
+     "T": 0.3,
+     "xy": null
+    },
+    {
+     "t": 98.68,
+     "frame": 2960,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 58,
+     "D": 8.9,
+     "T": 1.64,
+     "xy": [
+      283.4,
+      419.9
+     ]
+    },
+    {
+     "t": 100.32,
+     "frame": 3010,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 166,
+     "D": 10.04,
+     "T": 0.76,
+     "xy": [
+      286.0,
+      397.0
+     ]
+    },
+    {
+     "t": 101.08,
+     "frame": 3032,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 46,
+     "D": 8.61,
+     "T": 1.92,
+     "xy": [
+      331.1,
+      340.5
+     ]
+    },
+    {
+     "t": 103.0,
+     "frame": 3090,
+     "player": 3,
+     "name": "ตี๋",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 325,
+     "D": 8.99,
+     "T": 0.3,
+     "xy": [
+      146.4,
+      436.8
+     ]
+    },
+    {
+     "t": 103.3,
+     "frame": 3099,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 95,
+     "D": 8.5,
+     "T": 0.9,
+     "xy": [
+      108.5,
+      499.0
+     ]
+    },
+    {
+     "t": 104.2,
+     "frame": 3126,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 42,
+     "D": 6.26,
+     "T": 1.13,
+     "xy": [
+      323.1,
+      460.6
+     ]
+    },
+    {
+     "t": 105.33,
+     "frame": 3160,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 41,
+     "D": 8.52,
+     "T": 2.09,
+     "xy": [
+      193.2,
+      499.7
+     ]
+    },
+    {
+     "t": 107.42,
+     "frame": 3223,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 123,
+     "D": 10.93,
+     "T": 1.26,
+     "xy": [
+      339.2,
+      182.6
+     ]
+    },
+    {
+     "t": 108.68,
+     "frame": 3260,
+     "player": 1,
+     "name": "เทมป์",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 136,
+     "D": 11.53,
+     "T": 1.32,
+     "xy": [
+      355.3,
+      280.4
+     ]
+    },
+    {
+     "t": 110.0,
+     "frame": 3300,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 225,
+     "D": 11.23,
+     "T": 0.74,
+     "xy": [
+      291.8,
+      378.5
+     ]
+    },
+    {
+     "t": 110.74,
+     "frame": 3322,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 49,
+     "D": 7.93,
+     "T": 1.53,
+     "xy": [
+      48.3,
+      202.7
+     ]
+    },
+    {
+     "t": 112.27,
+     "frame": 3368,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": 85,
+     "D": 8.65,
+     "T": 1.05,
+     "xy": [
+      370.0,
+      430.4
+     ]
+    },
+    {
+     "t": 113.32,
+     "frame": 3400,
+     "player": 0,
+     "name": "บอส",
+     "side": 0,
+     "src": "config",
+     "speed_kmh": 156,
+     "D": 9.33,
+     "T": 0.68,
+     "xy": [
+      387.9,
+      610.4
+     ]
+    },
+    {
+     "t": 114.0,
+     "frame": 3420,
+     "player": 2,
+     "name": "เป้",
+     "side": 1,
+     "src": "config",
+     "speed_kmh": null,
+     "D": null,
+     "T": null,
+     "xy": [
+      326.7,
+      474.3
+     ]
+    }
+   ]
+  }
+ ],
+ "warnings": [
+  {
+   "t": 98.38,
+   "rally": 8,
+   "kind": "gap",
+   "msg": "ช็อตถัดไปห่าง 0.30 วิ (สั้นเกิน)"
+  },
+  {
+   "t": 103.0,
+   "rally": 8,
+   "kind": "speed",
+   "msg": "ความเร็ว 325 km/h (ตี๋)"
+  },
+  {
+   "t": 103.0,
+   "rally": 8,
+   "kind": "gap",
+   "msg": "ช็อตถัดไปห่าง 0.30 วิ (สั้นเกิน)"
+  }
+ ]
+}

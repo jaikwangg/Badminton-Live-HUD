@@ -13,5 +13,8 @@
 
 ## Acceptance
 - [ ] ทดสอบ homography กับจุดที่รู้ตำแหน่งจริง ต้องคลาดเคลื่อน <1 cm
+- [ ] มี test ล็อกขนาดคอร์ทไว้ที่ **13.40 × 6.10 ม.** (repo อ้างอิงใช้ 15 × 7.1 ผิด ดู REFERENCES)
+- [ ] คำนวณ `speed_mps` และ `dist_m` แบบสะสมทีละเฟรม (O(1) ต่อเฟรม) ห้ามคำนวณจากประวัติทั้งหมดใหม่ทุกเฟรม
+- [ ] `shuttle.landing_xy_m_est` เป็น `null` ระหว่างที่ลูกลอย
 - [ ] ถ้า kill players worker แล้ว WS ยังส่งข้อมูลต่อ และ `workers.players` เปลี่ยนเป็น `down`
 - [ ] GameState ทุก message ผ่านการตรวจ schema

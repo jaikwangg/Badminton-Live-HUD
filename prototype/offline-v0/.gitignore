@@ -1,0 +1,13 @@
+# generated media inside the prototype folder (the media itself is kept in /media via Git LFS)
+data/source.mov
+data/*.mov
+data/*.mp4
+data/*.wav
+site/*.mp4
+data/dets_yolo11*.json
+out/
+*.pt
+__pycache__/
+fonts/
+# raw detection data, archived in the media branch (stage1-offline-v0/data/)
+data/dets2.json
