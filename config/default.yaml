@@ -14,6 +14,7 @@ models:
   shuttle:
     backend: onnxruntime
     path: models/shuttle.onnx
+    endpoint: ipc:///tmp/hud_shuttle
     confidence_threshold: 0.45
     morph_kernel_size: 3
     min_contour_area: 5.0

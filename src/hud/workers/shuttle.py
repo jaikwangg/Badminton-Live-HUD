@@ -254,7 +254,7 @@ def _send_startup_heartbeat(publisher: Publisher) -> None:
 
 def run(config: AppConfig) -> None:
     settings = config.models["shuttle"]
-    publisher = ZmqPublisher("ipc:///tmp/hud_shuttle")
+    publisher = ZmqPublisher(str(settings["endpoint"]))
     bus = SharedFrameRing(
         config.bus.name,
         config.source.width,
