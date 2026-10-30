@@ -87,6 +87,7 @@ class FusionState:
         }
         self._latencies_ms: deque[float] = deque(maxlen=256)
         self._events: list[dict[str, Any]] = []
+        self._pending_points: dict[int, int | None] = {}
         self._track_to_id: dict[int, int] = {}
         self._mode = "singles"
         self._player_config: dict[int, dict[str, Any]] = {}
@@ -257,6 +258,32 @@ class FusionState:
             raise ValueError("side must be 0 or 1")
         with self._lock:
             self._score[side] = (self._score[side] or 0) + delta
+
+    def suggest_point(self, event_ts: int, suggested_side: int | None) -> None:
+        if suggested_side not in (None, 0, 1):
+            raise ValueError("suggested side must be 0, 1, or null")
+        with self._lock:
+            self._pending_points[event_ts] = suggested_side
+            self._events.append(
+                {
+                    "ts": event_ts,
+                    "kind": "point_suggested",
+                    "data": {"suggested_side": suggested_side},
+                }
+            )
+
+    def confirm_point(self, event_ts: int, accept: bool) -> None:
+        with self._lock:
+            if event_ts not in self._pending_points:
+                raise ValueError("No pending point suggestion for event_ts")
+            suggested_side = self._pending_points.pop(event_ts)
+            if accept and suggested_side is not None:
+                self._score[suggested_side] = (self._score[suggested_side] or 0) + 1
+
+    def reset_rally(self) -> None:
+        with self._lock:
+            self._rally = {"active": False, "n": 0, "t_ms": 0, "shots": 0}
+            self._pending_points.clear()
 
     def swap_ids(self, first: int, second: int) -> None:
         if first not in range(self._player_count) or second not in range(self._player_count):

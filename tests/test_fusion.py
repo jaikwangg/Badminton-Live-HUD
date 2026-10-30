@@ -140,6 +140,22 @@ def test_players_require_two_or_four_with_one_or_two_per_side() -> None:
         )
 
 
+def test_point_confirmation_scores_only_accepted_suggestions_and_reset_clears_rally() -> None:
+    state = FusionState()
+    state.suggest_point(10, 0)
+    state.confirm_point(10, accept=True)
+    assert state.snapshot()["match"]["score"] == [1, None]
+
+    state.suggest_point(20, 1)
+    state.confirm_point(20, accept=False)
+    assert state.snapshot()["match"]["score"] == [1, None]
+
+    state.reset_rally()
+    assert state.snapshot()["rally"] == {"active": False, "n": 0, "t_ms": 0, "shots": 0}
+    with pytest.raises(ValueError, match="No pending"):
+        state.confirm_point(20, accept=True)
+
+
 def test_singles_court_points_outside_singles_sidelines_are_null(tmp_path) -> None:
     state = FusionState(tmp_path / "court_calib.json")
     state.calibrate([[0, 0], [100, 0], [100, 100], [0, 100]])
