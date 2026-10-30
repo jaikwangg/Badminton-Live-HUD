@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "badminton-live-hud"
 version = "0.1.0"
 description = "Real-time badminton HUD pipeline"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "PyYAML>=6.0",
     "numpy>=1.26",
@@ -23,8 +23,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 # Model runtimes, imported lazily. Ultralytics is AGPL-3.0 (docs/REFERENCES.md).
-# GPU deployments install onnxruntime-gpu, TensorRT and pycuda separately.
+# GPU deployments install onnxruntime-gpu separately and add the trt extra.
 models = ["ultralytics>=8.0", "onnxruntime>=1.16"]
+# TensorRT engines (tools/export_trt.py and the runtime). 11.x drops BuilderFlag.FP16,
+# which our builder and Ultralytics' FP16 export use. cuda-bindings replaces pycuda.
+trt = ["tensorrt-cu12>=10,<11", "cuda-bindings>=12.6,<13"]
 # tools/export_trt.py only.
 export = ["torch>=2.0", "onnx>=1.14"]
 # Process CPU/RAM sampling in tools/benchmark.py and tools/soak_test.py.
