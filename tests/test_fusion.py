@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from hud.bus.messages import HeartbeatMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import compute_homography, transform_point
-from hud.fusion.state import FusionState, validate_game_state
+from hud.fusion.state import FusionState, _min_cost_pairs, validate_game_state
 from hud.server.operator_api import create_operator_app
 from hud.server.ws_server import create_ws_app
 
@@ -205,9 +205,10 @@ def test_singles_court_points_outside_singles_sidelines_are_null(tmp_path) -> No
         ).to_json()
     )
 
-    snapshot = state.snapshot()
-    assert snapshot["players"][0]["court_xy_m"] is None
-    assert snapshot["players"][1]["court_xy_m"] == pytest.approx([0.67, 3.05])
+    # The on-court track is matched first, so it takes its own side's slot 0.
+    by_foot = {tuple(p["img_xy"]): p for p in state.snapshot()["players"]}
+    assert by_foot[(5, 1)]["court_xy_m"] is None
+    assert by_foot[(50, 95)]["court_xy_m"] == pytest.approx([0.67, 3.05])
 
 
 def test_operator_api_and_websocket_serve_contract_state(tmp_path) -> None:
@@ -453,3 +454,74 @@ def test_shuttle_has_no_court_position_while_flying(tmp_path) -> None:
     assert shuttle["img_xy"] == [50, 50]
     assert shuttle["landing_xy_m_est"] is None
     assert "court_xy_m" not in shuttle
+
+
+def _doubles_state(tmp_path) -> FusionState:
+    state = _square_court_state(tmp_path)
+    state.set_players(
+        [
+            {"id": i, "name": str(i), "color": None, "team": i // 2, "side": i // 2}
+            for i in range(4)
+        ],
+        mode="doubles",
+    )
+    return state
+
+
+# Near-side partners walk through each other; the tracker swaps their ids at the crossing.
+_A_PATH = [1.0, 2.0, 2.8, 3.3, 4.0, 5.0]
+_B_PATH = [5.0, 4.0, 3.2, 2.7, 2.0, 1.0]
+
+
+def _cross(state: FusionState, app_a: list[float] | None, app_b: list[float] | None) -> None:
+    for frame_id, (a_y, b_y) in enumerate(zip(_A_PATH, _B_PATH, strict=True), start=1):
+        a_track, b_track = (10, 11) if frame_id <= 3 else (11, 10)
+        players = [
+            {"track_id": a_track, **_foot(3.0, a_y), "app": app_a},
+            {"track_id": b_track, **_foot(3.0, b_y), "app": app_b},
+        ]
+        state.ingest(
+            PlayersMessage(frame_id=frame_id, ts=frame_id * 1_000_000, players=players).to_json()
+        )
+
+
+def test_partners_crossing_keep_ids_by_appearance(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    _cross(state, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+    players = state.snapshot()["players"]
+    assert players[0]["court_xy_m"] == pytest.approx([3.0, 5.0])
+    assert players[1]["court_xy_m"] == pytest.approx([3.0, 1.0])
+    assert [p["side"] for p in players[:2]] == [0, 0]
+
+
+def test_null_appearance_falls_back_to_position(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    _cross(state, None, None)
+    # Without appearance the nearest-position match follows the crossing detections.
+    players = state.snapshot()["players"]
+    assert players[0]["court_xy_m"] == pytest.approx([3.0, 1.0])
+    assert players[1]["court_xy_m"] == pytest.approx([3.0, 5.0])
+
+
+def test_operator_swap_sticks_against_appearance(tmp_path) -> None:
+    state = _doubles_state(tmp_path)
+    app_a, app_b = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+    _cross(state, app_a, app_b)
+    state.swap_ids(0, 1)
+    for frame_id, (a_y, b_y) in enumerate([(4.8, 1.2), (4.6, 1.4)], start=7):
+        players = [
+            {"track_id": 11, **_foot(3.0, a_y), "app": app_a},
+            {"track_id": 10, **_foot(3.0, b_y), "app": app_b},
+        ]
+        state.ingest(
+            PlayersMessage(frame_id=frame_id, ts=frame_id * 1_000_000, players=players).to_json()
+        )
+    players = state.snapshot()["players"]
+    assert players[1]["court_xy_m"] == pytest.approx([3.0, 4.6])
+    assert players[0]["court_xy_m"] == pytest.approx([3.0, 1.4])
+
+
+def test_min_cost_pairs_handles_rectangular_costs() -> None:
+    assert _min_cost_pairs([[5.0, 1.0], [1.0, 5.0]]) == [(0, 1), (1, 0)]
+    assert _min_cost_pairs([[3.0], [1.0], [2.0]]) == [(1, 0)]
+    assert _min_cost_pairs([]) == []
