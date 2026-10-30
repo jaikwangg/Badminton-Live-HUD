@@ -11,7 +11,9 @@ import numpy as np
 import pytest
 
 from hud.bus.messages import Frame, ShuttleMessage
+from hud.config import load_config
 from hud.models.shuttle import ResizedFrame, TensorInfo, TrackNetV3Tracker
+from hud.workers import shuttle as shuttle_worker
 from hud.workers.shuttle import ShuttleWorker
 
 
@@ -274,3 +276,18 @@ def test_cuda_fallback_to_cpu_marks_tracker_degraded(monkeypatch, caplog) -> Non
     assert tracker.degraded is True
     assert "CUDAExecutionProvider" in tracker.session.requested
     assert "runs on ['CPUExecutionProvider']" in caplog.text
+
+
+def test_run_binds_the_configured_bus_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config()
+    config.bus.endpoints["shuttle"] = "tcp://127.0.0.1:59998"
+    bound: list[str] = []
+
+    def fake_publisher(address: str) -> None:
+        bound.append(address)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(shuttle_worker, "ZmqPublisher", fake_publisher)
+    with pytest.raises(RuntimeError, match="stop"):
+        shuttle_worker.run(config)
+    assert bound == ["tcp://127.0.0.1:59998"]
