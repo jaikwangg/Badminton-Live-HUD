@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import subprocess
 import threading
@@ -12,13 +13,15 @@ from typing import TextIO
 
 from hud.config import AppConfig, load_config
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class WorkerProcess:
     command: list[str]
-    process: subprocess.Popen[str]
+    process: subprocess.Popen[str] | None  # None: spawn failed, worker is down
     last_heartbeat: float
-    reader: threading.Thread
+    reader: threading.Thread | None
 
 
 class Supervisor:
@@ -43,20 +46,28 @@ class Supervisor:
                 continue
 
     def _start(self, name: str, command: list[str]) -> None:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+            )
+        except (OSError, ValueError):
+            logger.exception("worker %s failed to start: %s", name, command)
+            # Retry after one heartbeat timeout, like a worker that went quiet.
+            self._workers[name] = WorkerProcess(command, None, time.monotonic(), None)
+            return
         assert process.stdout is not None
         reader = threading.Thread(
             target=self._read_heartbeats, args=(name, process.stdout), daemon=True
         )
         reader.start()
-        self._workers[name] = WorkerProcess(command, process, time.monotonic(), reader)
+        # The heartbeat timeout only starts counting after the startup grace period.
+        first_deadline = time.monotonic() + self.config.supervisor.startup_grace_s
+        self._workers[name] = WorkerProcess(command, process, first_deadline, reader)
 
     def start(self) -> None:
         for name, settings in self.config.workers.items():
@@ -77,7 +88,8 @@ class Supervisor:
                     self._workers[name].last_heartbeat = received
             now = time.monotonic()
             for name, worker in list(self._workers.items()):
-                if worker.process.poll() is None and now - worker.last_heartbeat <= timeout:
+                running = worker.process is None or worker.process.poll() is None
+                if running and now - worker.last_heartbeat <= timeout:
                     continue
                 self._stop_worker(worker)
                 self._start(name, worker.command)
@@ -89,6 +101,8 @@ class Supervisor:
 
     @staticmethod
     def _stop_worker(worker: WorkerProcess) -> None:
+        if worker.process is None:
+            return
         if worker.process.poll() is None:
             worker.process.terminate()
             try:
