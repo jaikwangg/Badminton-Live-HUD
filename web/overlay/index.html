@@ -11,7 +11,7 @@
     <main class="hud" aria-label="Badminton match HUD">
       <header class="topbar">
         <div class="brand"><span class="brand-mark">B</span><span>COURTSIDE <b>LIVE</b></span></div>
-        <div class="score-line"><span class="score-label">SINGLES</span><strong><span id="score-0">—</span> <i>:</i> <span id="score-1">—</span></strong><span class="games-label" id="games-line">GAMES — : —</span></div>
+        <div class="score-line"><span class="score-label" id="mode-label">SINGLES</span><strong><span id="score-0">—</span> <i>:</i> <span id="score-1">—</span></strong><span class="games-label" id="games-line">GAMES — : —</span></div>
         <div class="status-pill" id="connection" data-state="connecting"><i></i><span>CONNECTING</span></div>
       </header>
 
@@ -27,38 +27,36 @@
       <div class="shuttle-marker" id="shuttle-marker" aria-hidden="true"><span></span></div>
 
       <footer class="bottom-row">
-        <section class="player-card glass" id="player-card-0">
-          <div class="player-accent cyan"></div>
-          <div class="player-heading"><span class="player-number">01</span><span class="tracked-dot"></span><span class="player-name" id="player-name-0">PLAYER 1</span></div>
-          <div class="player-metrics">
-            <div><strong id="player-speed-0">—</strong><span>MOVE <i>m/s</i></span></div>
-            <div><strong id="player-distance-0">—</strong><span>DISTANCE <i>m</i></span></div>
-          </div>
-        </section>
+        <div class="team-cards" id="team-cards-0"></div>
 
         <div class="court-card glass" aria-label="Court map">
           <div class="court-title"><span>COURT MAP</span><span id="shuttle-status">SHUTTLE LOST</span></div>
-          <svg class="court" viewBox="0 0 402 184" role="img" aria-label="Singles court map">
+          <!-- 400x182 px = 13.40x6.10 m, about 29.85 px per metre, offset 1 px -->
+          <svg class="court" viewBox="0 0 402 184" role="img" aria-label="Court map">
             <rect x="1" y="1" width="400" height="182" rx="4" class="court-outline"/>
-            <line x1="101" y1="1" x2="101" y2="183"/><line x1="301" y1="1" x2="301" y2="183"/>
-            <line x1="1" y1="34" x2="401" y2="34"/><line x1="1" y1="150" x2="401" y2="150"/>
+            <line x1="1" y1="14.7" x2="401" y2="14.7"/><line x1="1" y1="169.3" x2="401" y2="169.3"/>
+            <line x1="142" y1="1" x2="142" y2="183"/><line x1="260" y1="1" x2="260" y2="183"/>
+            <line x1="23.7" y1="1" x2="23.7" y2="183"/><line x1="378.3" y1="1" x2="378.3" y2="183"/>
+            <line x1="1" y1="92" x2="142" y2="92"/><line x1="260" y1="92" x2="401" y2="92"/>
             <line x1="201" y1="1" x2="201" y2="183" class="net"/>
-            <line x1="101" y1="34" x2="301" y2="34"/><line x1="101" y1="150" x2="301" y2="150"/>
-            <circle id="court-player-0" class="court-player cyan" cx="0" cy="0" r="7"/>
-            <circle id="court-player-1" class="court-player violet" cx="0" cy="0" r="7"/>
-            <circle id="court-shuttle" class="court-shuttle" cx="0" cy="0" r="4"/>
+            <g id="court-players"></g>
+            <g id="court-shuttle" class="court-shuttle"><circle cx="0" cy="0" r="4"/><text x="7" y="-6">est.</text></g>
           </svg>
         </div>
 
-        <section class="player-card glass right" id="player-card-1">
-          <div class="player-accent violet"></div>
-          <div class="player-heading"><span class="player-number">02</span><span class="tracked-dot"></span><span class="player-name" id="player-name-1">PLAYER 2</span></div>
+        <div class="team-cards right" id="team-cards-1"></div>
+      </footer>
+
+      <template id="player-card-template">
+        <section class="player-card glass">
+          <div class="player-accent"></div>
+          <div class="player-heading"><span class="player-number"></span><span class="tracked-dot"></span><span class="player-name"></span></div>
           <div class="player-metrics">
-            <div><strong id="player-speed-1">—</strong><span>MOVE <i>m/s</i></span></div>
-            <div><strong id="player-distance-1">—</strong><span>DISTANCE <i>m</i></span></div>
+            <div><strong class="player-speed">—</strong><span>MOVE <i>m/s</i></span></div>
+            <div><strong class="player-distance">—</strong><span>DISTANCE <i>m</i></span></div>
           </div>
         </section>
-      </footer>
+      </template>
 
       <div class="signal-lost" id="signal-lost" role="status" hidden><span>!</span> SIGNAL LOST <small>RECONNECTING</small></div>
     </main>
