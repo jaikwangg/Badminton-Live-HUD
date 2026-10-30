@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any, Protocol
 
 import cv2
 import numpy as np
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +154,8 @@ class TrackNetV3Tracker:
         self.morph_kernel_size = morph_kernel_size
         self.min_contour_area = min_contour_area
         self.max_contour_area = max_contour_area
+        # True when a GPU provider was available but the session fell back to CPU.
+        self.degraded = False
         self.session = session or self._create_session(backend)
 
         inputs = self.session.get_inputs()
@@ -197,7 +202,18 @@ class TrackNetV3Tracker:
                 if "CUDAExecutionProvider" in providers
                 else ["CPUExecutionProvider"]
             )
-            return ort.InferenceSession(str(self.path), providers=selected)
+            session = ort.InferenceSession(str(self.path), providers=selected)
+            active = session.get_providers()
+            LOGGER.info("Shuttle ONNX Runtime providers: requested=%s active=%s", selected, active)
+            # onnxruntime-gpu silently falls back to CPU when CUDA libraries fail to load.
+            if selected[0] not in active:
+                self.degraded = True
+                LOGGER.warning(
+                    "Shuttle model requested %s but runs on %s; inference will be slow",
+                    selected[0],
+                    active,
+                )
+            return session
         if backend == "tensorrt":
             if self.path.suffix.lower() != ".engine":
                 raise ValueError("TensorRT shuttle backend requires a .engine model")
