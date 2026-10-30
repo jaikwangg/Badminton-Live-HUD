@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from hud.fusion.state import FusionState
+
+_OPERATOR_DIR = Path(__file__).resolve().parents[3] / "web" / "operator"
 
 
 def create_operator_app(state: FusionState) -> Any:
     try:
         from fastapi import FastAPI, HTTPException
+        from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
         raise RuntimeError("Install FastAPI and Uvicorn to run the operator API") from exc
 
@@ -62,6 +66,24 @@ def create_operator_app(state: FusionState) -> Any:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"ok": True}
 
+    @app.post("/api/point/confirm")
+    async def confirm_point(payload: dict[str, Any]) -> dict[str, bool]:
+        try:
+            event_ts, accept = payload["event_ts"], payload["accept"]
+            if type(event_ts) is not int or type(accept) is not bool:
+                raise ValueError("event_ts must be an integer and accept must be a boolean")
+            state.confirm_point(event_ts, accept)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ok": True}
+
+    @app.post("/api/rally/reset")
+    async def reset_rally() -> dict[str, bool]:
+        state.reset_rally()
+        return {"ok": True}
+
+    # Mounted last so the API routes above take precedence; serves the page at `/`.
+    app.mount("/", StaticFiles(directory=_OPERATOR_DIR, html=True), name="operator")
     return app
 
 

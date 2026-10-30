@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Badminton Live HUD Operator</title>
+    <link rel="stylesheet" href="operator.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">BADMINTON LIVE HUD</p>
+        <h1>Operator Console</h1>
+      </div>
+      <div id="connection" class="connection"><span></span><b>กำลังเชื่อมต่อ</b></div>
+    </header>
+
+    <main>
+      <section class="panel" id="live">
+        <div class="section-heading"><div><p class="eyebrow">LIVE</p><h2>คะแนนและแรลลี่</h2></div></div>
+        <div class="scoreboard">
+          <div class="team" data-team="0">
+            <span id="team-name-0">ทีม 0</span><strong id="score-0">—</strong>
+            <button class="quiet" data-score-team="0" data-delta="-1" aria-label="ลดคะแนนทีม 0">−</button>
+            <button data-score-team="0" data-delta="1" aria-label="เพิ่มคะแนนทีม 0">+1</button>
+          </div>
+          <div class="team" data-team="1">
+            <span id="team-name-1">ทีม 1</span><strong id="score-1">—</strong>
+            <button class="quiet" data-score-team="1" data-delta="-1" aria-label="ลดคะแนนทีม 1">−</button>
+            <button data-score-team="1" data-delta="1" aria-label="เพิ่มคะแนนทีม 1">+1</button>
+          </div>
+        </div>
+        <div id="point-suggestion" class="suggestion" hidden>
+          <div><p class="eyebrow">ระบบเสนอแต้ม</p><p id="suggestion-text"></p></div>
+          <button id="accept-point">ยืนยัน</button>
+          <button id="reject-point" class="secondary">ปฏิเสธ</button>
+        </div>
+        <div class="actions">
+          <div id="partner-swaps" class="swap-buttons"></div>
+          <label>สลับ ID
+            <span class="pair"><select id="swap-a" aria-label="ผู้เล่นคนที่ 1"></select>↔<select id="swap-b" aria-label="ผู้เล่นคนที่ 2"></select></span>
+          </label>
+          <button id="swap-ids" class="secondary">สลับ</button>
+          <button id="reset-rally" class="danger">เริ่มแรลลี่ใหม่</button>
+        </div>
+        <p id="control-status" class="status" aria-live="polite"></p>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading"><div><p class="eyebrow">SYSTEM</p><h2>สถานะระบบ</h2></div></div>
+        <div class="health-grid">
+          <div><span>FPS</span><strong id="health-fps">—</strong></div>
+          <div><span>Latency p50</span><strong id="health-p50">—</strong></div>
+          <div><span>Latency p99</span><strong id="health-p99">—</strong></div>
+          <div><span>Dropped</span><strong id="health-dropped">—</strong></div>
+        </div>
+        <div id="workers" class="worker-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading"><div><p class="eyebrow">1 · COURT</p><h2>คาลิเบรตคอร์ท</h2></div></div>
+        <p class="help">เลือกภาพนิ่งจากกล้อง (ขนาดเต็มเท่าภาพจริง) แล้วแตะ 4 มุมคอร์ทตามลำดับ ถ้าจุดคลาดให้ลากแก้ได้</p>
+        <label class="file-button">เลือกภาพคอร์ท<input id="court-image" type="file" accept="image/*" /></label>
+        <p id="calibration-hint" class="hint" hidden></p>
+        <canvas id="calibration" aria-label="แตะหรือลากมุมคอร์ท"></canvas>
+        <div class="row">
+          <button id="save-calibration" disabled>บันทึกคาลิเบรต</button>
+          <button id="reset-corners" class="secondary" disabled>รีเซ็ตจุด</button>
+        </div>
+        <p id="calibration-status" class="status" aria-live="polite"></p>
+      </section>
+
+      <section class="panel">
+        <div class="section-heading">
+          <div><p class="eyebrow">2 · MATCH</p><h2>ผู้เล่น</h2></div>
+          <label class="mode-field">ประเภท
+            <select id="mode"><option value="singles">เดี่ยว</option><option value="doubles">คู่</option></select>
+          </label>
+        </div>
+        <div id="players" class="player-grid"></div>
+        <button id="save-players">บันทึกผู้เล่น</button>
+        <p id="player-status" class="status" aria-live="polite"></p>
+      </section>
+    </main>
+    <script src="operator.js"></script>
+  </body>
+</html>
