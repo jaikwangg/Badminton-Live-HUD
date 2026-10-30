@@ -59,8 +59,11 @@
 
       <section class="panel">
         <div class="section-heading"><div><p class="eyebrow">1 · COURT</p><h2>คาลิเบรตคอร์ท</h2></div></div>
-        <p class="help">เลือกภาพนิ่งจากกล้อง (ขนาดเต็มเท่าภาพจริง) แล้วแตะ 4 มุมคอร์ทตามลำดับ ถ้าจุดคลาดให้ลากแก้ได้</p>
-        <label class="file-button">เลือกภาพคอร์ท<input id="court-image" type="file" accept="image/*" /></label>
+        <p class="help">ดึงภาพจากกล้อง (หรือเลือกไฟล์ภาพนิ่งขนาดเต็มเท่าภาพจริง) แล้วแตะ 4 มุมคอร์ทตามลำดับ ถ้าจุดคลาดให้ลากแก้ได้</p>
+        <div class="row frame-source">
+          <button id="load-frame">ดึงภาพจากกล้อง</button>
+          <label class="file-button">เลือกไฟล์ภาพ<input id="court-image" type="file" accept="image/*" /></label>
+        </div>
         <p id="calibration-hint" class="hint" hidden></p>
         <canvas id="calibration" aria-label="แตะหรือลากมุมคอร์ท"></canvas>
         <div class="row">
