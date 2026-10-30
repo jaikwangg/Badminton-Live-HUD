@@ -5,7 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from hud.bus.messages import HeartbeatMessage, PlayersMessage
+from hud.bus.messages import HeartbeatMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import compute_homography, transform_point
 from hud.fusion.state import FusionState, validate_game_state
 from hud.server.operator_api import create_operator_app
@@ -421,3 +421,35 @@ def test_players_message_with_appearance_vector_is_accepted(tmp_path) -> None:
         )
     )
     assert state.snapshot()["players"][0]["tracked"] is True
+
+
+def test_swap_ids_moves_tracks_but_names_stay_with_ids(tmp_path) -> None:
+    state = _square_court_state(tmp_path)
+    state.set_players(
+        [
+            {"id": 0, "name": "A", "color": "#fff", "team": 0, "side": 0},
+            {"id": 1, "name": "B", "color": "#000", "team": 1, "side": 1},
+        ]
+    )
+    near = {"track_id": 10, **_foot(2.0, 3.0)}
+    far = {"track_id": 11, **_foot(11.0, 3.0)}
+    state.ingest(PlayersMessage(frame_id=1, ts=1_000_000, players=[near, far]).to_json())
+    state.swap_ids(0, 1)
+    swapped = state.snapshot()["players"]
+    assert swapped[1]["img_xy"] == near["foot_px"]
+    assert (swapped[1]["name"], swapped[1]["color"], swapped[1]["team"]) == ("B", "#000", 1)
+    assert (swapped[0]["name"], swapped[0]["img_xy"]) == ("A", far["foot_px"])
+    # The next frame keeps feeding track 10 into id 1.
+    state.ingest(PlayersMessage(frame_id=2, ts=2_000_000, players=[near, far]).to_json())
+    players = state.snapshot()["players"]
+    assert (players[1]["name"], players[1]["img_xy"]) == ("B", near["foot_px"])
+    assert (players[0]["name"], players[0]["img_xy"]) == ("A", far["foot_px"])
+
+
+def test_shuttle_has_no_court_position_while_flying(tmp_path) -> None:
+    state = _square_court_state(tmp_path)
+    state.ingest(ShuttleMessage(frame_id=1, ts=1_000_000, visible=True, px=[50, 50]).to_json())
+    shuttle = state.snapshot()["shuttle"]
+    assert shuttle["img_xy"] == [50, 50]
+    assert shuttle["landing_xy_m_est"] is None
+    assert "court_xy_m" not in shuttle

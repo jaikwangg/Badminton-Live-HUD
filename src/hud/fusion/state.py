@@ -10,17 +10,10 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from hud.bus.messages import (
-    HeartbeatMessage,
-    HitMessage,
-    PlayerDetection,
-    PlayersMessage,
-    ShuttleMessage,
-)
+from hud.bus.messages import HeartbeatMessage, HitMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import COURT_LENGTH_M, load_homography, transform_point
 
 _WORKERS = ("players", "shuttle", "audio")
-_DETECTION_FIELDS = ("track_id", "bbox", "foot_px", "conf")
 _NET_X_M = COURT_LENGTH_M / 2
 
 
@@ -67,7 +60,7 @@ def validate_game_state(value: dict[str, Any]) -> None:
             if len(court_xy) != 2 or not lower_y <= court_xy[1] <= upper_y:
                 raise ValueError(f"Player court y is outside the {mode} sidelines")
     shuttle = value["shuttle"]
-    if set(shuttle) != {"status", "img_xy", "court_xy_m", "last_shot"}:
+    if set(shuttle) != {"status", "img_xy", "landing_xy_m_est", "last_shot"}:
         raise ValueError("Invalid shuttle fields")
     if shuttle["status"] not in {"tracked", "predicted", "lost"}:
         raise ValueError("Invalid shuttle status")
@@ -104,7 +97,8 @@ class FusionState:
         self._shuttle: dict[str, Any] = {
             "status": "lost",
             "img_xy": None,
-            "court_xy_m": None,
+            # Stays null until landing estimation exists; a flying shuttle has no court xy.
+            "landing_xy_m_est": None,
             "last_shot": {"by": None, "speed_kmh_est": None, "type": None},
         }
         self._rally = {"active": False, "n": 0, "t_ms": 0, "shots": 0}
@@ -126,15 +120,7 @@ class FusionState:
         now = time.monotonic()
         with self._lock:
             if kind == "players":
-                # Workers may add fields such as `app`; fusion keeps only what it uses today.
-                decoded = PlayersMessage(
-                    frame_id=message["frame_id"],
-                    ts=message["ts"],
-                    players=[
-                        PlayerDetection(**{key: item.get(key) for key in _DETECTION_FIELDS})
-                        for item in message.get("players") or []
-                    ],
-                )
+                decoded = PlayersMessage.from_json(payload)  # `app` is parsed but unused here
                 self._record_latency(decoded.ts)
                 if self._last_frame_id is not None and decoded.frame_id > self._last_frame_id + 1:
                     self._dropped += decoded.frame_id - self._last_frame_id - 1
@@ -214,15 +200,9 @@ class FusionState:
             elif kind == "shuttle":
                 decoded = ShuttleMessage.from_json(payload)
                 self._record_latency(decoded.ts)
-                court_xy = (
-                    self._court_point(decoded.px)
-                    if (decoded.visible and decoded.px and self.homography is not None)
-                    else None
-                )
                 self._shuttle.update(
                     status="tracked" if decoded.visible else "lost",
                     img_xy=decoded.px if decoded.visible else None,
-                    court_xy_m=court_xy,
                 )
             elif kind == "hit":
                 decoded = HitMessage.from_json(payload)
@@ -341,20 +321,17 @@ class FusionState:
                 self._players.get(second),
                 self._players.get(first),
             )
-            if self._players[first] is None:
-                self._players.pop(first)
-            else:
-                self._players[first]["id"] = first
-            if self._players[second] is None:
-                self._players.pop(second)
-            else:
-                self._players[second]["id"] = second
-            first_meta = self._player_config.get(first)
-            second_meta = self._player_config.get(second)
-            if first_meta is not None or second_meta is not None:
-                self._player_config[first], self._player_config[second] = (
-                    second_meta or {},
-                    first_meta or {},
+            # Live data follows the track; name, colour and team stay with the id.
+            for player_id in (first, second):
+                if self._players[player_id] is None:
+                    self._players.pop(player_id)
+                    continue
+                metadata = self._player_config.get(player_id, {})
+                self._players[player_id].update(
+                    id=player_id,
+                    name=metadata.get("name"),
+                    color=metadata.get("color"),
+                    team=metadata.get("team", player_id % 2),
                 )
 
     def snapshot(self, *, drain_events: bool = True) -> dict[str, Any]:
