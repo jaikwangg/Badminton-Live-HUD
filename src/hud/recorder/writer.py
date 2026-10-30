@@ -7,7 +7,7 @@ import json
 import logging
 import math
 import shutil
-import struct
+import signal
 import subprocess
 import threading
 import time
@@ -71,32 +71,13 @@ def empty_game_state(ts: int, mode: str = "singles") -> dict[str, Any]:
     }
 
 
-# Slot header layout from CONTRACTS.md "Frame bus": frame_id, ts, width, height, seq.
-_SLOT_HEADER = struct.Struct("<QqHHQ")
-
-
 def read_new_frames(bus: SharedFrameRing, after_id: int | None) -> list[Frame]:
     """Return every stable ring frame newer than `after_id`, oldest first.
 
     `read_latest` only yields the newest slot, so a poll that wakes late (Windows timers tick
     at ~15.6 ms) loses the frames in between. With `after_id=None` only the newest is returned.
     """
-    # ponytail: per-slot read lives here because bus/ is owned by T01; move to
-    # SharedFrameRing (e.g. read_since) once T01 adds it.
-    frames: list[Frame] = []
-    for slot in range(bus.slots):
-        offset = slot * bus.slot_size
-        frame_id, ts, width, height, seq = _SLOT_HEADER.unpack_from(bus.shm.buf, offset)
-        if not frame_id or seq % 2 or (after_id is not None and frame_id <= after_id):
-            continue
-        start = offset + _SLOT_HEADER.size
-        image = bytes(bus.shm.buf[start : start + width * height * 3])
-        check = _SLOT_HEADER.unpack_from(bus.shm.buf, offset)
-        # A changed seq means the writer reused this slot for a newer frame mid-copy; that
-        # newer frame is picked up on the next poll, the overwritten one is gone either way.
-        if check[4] == seq and check[0] == frame_id:
-            frames.append(Frame(frame_id, ts, width, height, image))
-    frames.sort(key=lambda frame: frame.frame_id)
+    frames = bus.read_since(after_id or 0)
     return frames if after_id is not None else frames[-1:]
 
 
@@ -632,9 +613,23 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def install_stop_signals(recorder: Recorder) -> None:
+    """Turn SIGTERM into a clean stop so run() closes FFmpeg's stdin and the segment finalizes."""
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(signum, recorder.stop)
+        except (NotImplementedError, RuntimeError):
+            # Windows: terminate() is TerminateProcess and cannot be caught; Ctrl+C still
+            # cancels run(), whose finally block closes the encoder.
+            pass
+
+
 async def serve(config_path: str | None = None) -> None:
     config = load_config(config_path)
-    await Recorder(config, config_snapshot=config_path).run()
+    recorder = Recorder(config, config_snapshot=config_path)
+    install_stop_signals(recorder)
+    await recorder.run()
 
 
 def main() -> None:
