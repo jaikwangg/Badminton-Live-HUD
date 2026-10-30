@@ -2,14 +2,34 @@
 
 from __future__ import annotations
 
+import os
 import struct
-from multiprocessing import shared_memory
+import sys
+from multiprocessing import resource_tracker, shared_memory
 from typing import Any
 
 from hud.bus.messages import Frame
 
 _HEADER = struct.Struct("<QqHHQ")  # frame_id, capture ts, width, height, seqlock seq
 _HEADER_SIZE = _HEADER.size
+_HAS_TRACK_ARG = sys.version_info >= (3, 13)
+_POSIX = os.name == "posix"
+
+
+def _attach_untracked(name: str) -> shared_memory.SharedMemory:
+    """Attach to an existing segment so this process exiting never unlinks it.
+
+    Before 3.13, POSIX attaches register with resource_tracker, which unlinks the segment
+    when the attaching process exits, killing the bus for every other worker.
+    """
+    if _HAS_TRACK_ARG:
+        return shared_memory.SharedMemory(name=name, track=False)
+    shm = shared_memory.SharedMemory(name=name)
+    if _POSIX:
+        # ponytail: the tracker keeps one entry per name per process, so a reader in the
+        # creator's own process also drops the creator's crash cleanup; fine outside tests.
+        resource_tracker.unregister(shm._name, "shared_memory")
+    return shm
 
 
 class SharedFrameRing:
@@ -32,9 +52,14 @@ class SharedFrameRing:
         self.height = height
         self.slots = slots
         self.slot_size = _HEADER_SIZE + width * height * 3
-        self.shm = shared_memory.SharedMemory(
-            name=name, create=create, size=self.slot_size * slots if create else 0
-        )
+        # The creator owns the segment (and on Windows must keep its handle open, since the
+        # segment vanishes once the last handle closes); readers attach without ownership.
+        if create:
+            self.shm = shared_memory.SharedMemory(
+                name=name, create=True, size=self.slot_size * slots
+            )
+        else:
+            self.shm = _attach_untracked(name)
 
     def write(self, frame: Any, ts: int) -> int:
         """Write a uint8 BGR image and capture timestamp; return its frame id."""
