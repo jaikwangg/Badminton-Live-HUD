@@ -17,7 +17,7 @@
 ## Worker → Fusion (ZeroMQ PUB, `ipc:///tmp/hud_<name>`, JSON)
 ```json
 {"v":1,"type":"players","frame_id":123,"ts":0,
- "players":[{"track_id":3,"bbox":[x1,y1,x2,y2],"foot_px":[x,y],"conf":0.91}]}
+ "players":[{"track_id":3,"bbox":[x1,y1,x2,y2],"foot_px":[x,y],"conf":0.91,"app":[0.12,0.53,0.31]}]}
 
 {"v":1,"type":"shuttle","frame_id":123,"ts":0,"visible":true,"px":[x,y],"conf":0.83}
 
@@ -25,6 +25,8 @@
 
 {"v":1,"type":"heartbeat","worker":"players","ts":0,"fps":59.8,"proc_ms":6.1}
 ```
+
+- `players[].app` = เวกเตอร์ลักษณะภายนอกสำหรับแยกตัวตน (เช่น สีเสื้อช่วงอกที่ตัดสีพื้นคอร์ทออก หรือ re-ID embedding) ความยาวคงที่ตาม config ถ้าไม่มีให้ส่ง `null`
 
 ## Fusion → Clients (WS `:8765`, ส่ง 30Hz, JSON)
 ```json
@@ -61,7 +63,7 @@
 
 _Changelog:_
 - _2026-10-29 เปลี่ยน `shuttle.court_xy_m` เป็น `landing_xy_m_est` ตอนนี้ยังไม่มีโค้ดที่ใช้ฟิลด์นี้ จึงไม่ต้องเพิ่มเลขเวอร์ชัน (`v`)_
-- _2026-10-30 รองรับประเภทคู่: `match.mode` = `doubles`, เพิ่ม `players[].team`, `mode` ใน `/api/players` และ `team` ใน `/api/score` (ยังรับ `side` แบบเดิม) เข้ากับของเดิมทั้งหมด จึงไม่เพิ่มเลขเวอร์ชัน_
+- _2026-10-30 รองรับประเภทคู่: `match.mode` = `doubles`, เพิ่ม `players[].team`, `app` ใน message `players` ของ worker, `mode` ใน `/api/players` และ `team` ใน `/api/score` (ยังรับ `side` แบบเดิม) เข้ากับของเดิมทั้งหมด จึงไม่เพิ่มเลขเวอร์ชัน_
 
 ## Operator API (HTTP `:8080`)
 
