@@ -89,6 +89,28 @@ def test_kalman_detects_direction_change_on_reversal() -> None:
     assert dir_changed, "Filter should detect direction reversal"
 
 
+@pytest.mark.parametrize("fps", [30, 60])
+def test_kalman_confirms_reversal_over_three_points_each_side(fps: int) -> None:
+    kf = ShuttleKalmanFilter(turn_points=3)
+    step = 1_000_000_000 // fps
+    d = 600.0 / fps  # 600 px/s up to the vertex at i=5, then down
+    points = [[300.0, 500.0 - min(i, 10 - i) * d] for i in range(10)]
+    results = [kf.update(True, p, i * step) for i, p in enumerate(points)]
+    assert [i for i, r in enumerate(results) if r.direction_changed] == [8]
+    turn = results[8]
+    assert turn.turn_ts == 6 * step and turn.turn_px == points[5]
+
+
+def test_kalman_single_outlier_is_not_a_reversal() -> None:
+    kf = ShuttleKalmanFilter()
+    step = 33_333_333
+    xs = [100.0 + 20.0 * i for i in range(12)]
+    xs[6] -= 60.0  # one false detection behind the shuttle
+    assert not any(
+        kf.update(True, [x, 300.0], i * step).direction_changed for i, x in enumerate(xs)
+    )
+
+
 # ============================================================================
 # 2. Shot Detector and Shot Speed Tests
 # ============================================================================
@@ -180,8 +202,10 @@ def test_shot_speed_is_filled_for_previous_shot_when_it_is_returned() -> None:
     assert event["data"]["prev_speed_kmh_est"] == pytest.approx(124.6)
     assert s2.speed_kmh_est is None and fsm.prev_shot is s1 and fsm.last_shot is s2
 
-    # A stronger same-side shot replaces s2 and recomputes s1 from the new return.
-    s2b = ShotInfo(ts=2_500_000_000, by=1, speed_kmh_est=None, side=1, evidence=1.5)
+    # A stronger candidate for the same hit replaces s2 and recomputes s1 from the new return.
+    s2b = ShotInfo(
+        ts=2_500_000_000, by=1, speed_kmh_est=None, side=1, evidence=1.5, replaces_ts=s2.ts
+    )
     s2b.hitter_xy_m = [7.0, 3.0]  # D=6 m in 1.5 s
     fsm.on_shot(s2b)
     (event,) = fsm.drain_events()
@@ -218,10 +242,12 @@ def test_doubles_hitter_is_nearest_player_on_that_side_at_hit_time() -> None:
         {"id": 3, "team": 1, "side": 1, "bbox": [600, 100, 640, 200]},
     ]
     shot = detector.register_direction_change(
-        ts=1_000_000_000, px=[650, 90], players=players, audio_degraded=True
+        ts=1_000_000_000, px=[630, 90], players=players, audio_degraded=True
     )
     assert shot is not None
-    assert (shot.by, shot.side, shot.team, shot.evidence) == (3, 1, 1, 0.0)
+    # 10 px above a 100 px box = 0.1 heights: vision evidence 0.9 * (1 - 0.1 / 0.5).
+    assert (shot.by, shot.side, shot.team) == (3, 1, 1)
+    assert math.isclose(shot.evidence, 0.72)
 
     # Audio-matched shot carries stronger evidence and the hitter of the stored change.
     detector.register_direction_change(ts=2_000_000_000, px=[880, 520], players=players)
@@ -342,28 +368,140 @@ def test_rally_fsm_end_returns_to_idle_and_next_serve_starts_new_rally() -> None
     assert (fsm.state, fsm.rally_n) == (RallyState.RALLY, 3)
 
 
-def test_rally_fsm_shots_alternate_sides_keeping_stronger_evidence() -> None:
-    fsm = RallyFSM()
-    fsm.on_shot(ShotInfo(ts=1, by=0, speed_kmh_est=None, side=0, evidence=1.5))
-    fsm.on_shot(ShotInfo(ts=2, by=1, speed_kmh_est=None, side=1, evidence=0.0))
+_DOUBLES = [
+    {"id": 0, "team": 0, "side": 0, "bbox": [100, 500, 200, 700], "court_xy_m": [2.0, 1.0]},
+    {"id": 1, "team": 0, "side": 0, "bbox": [400, 500, 500, 700], "court_xy_m": [2.0, 5.0]},
+    {"id": 2, "team": 1, "side": 1, "bbox": [100, 300, 130, 360], "court_xy_m": [11.0, 1.0]},
+    {"id": 3, "team": 1, "side": 1, "bbox": [400, 300, 430, 360], "court_xy_m": [11.0, 5.0]},
+]
+
+
+def test_rally_fsm_takes_hitter_side_from_alternation_and_never_drops_same_side() -> None:
+    fsm = RallyFSM(mode="doubles", alternation="always")
+    fsm.on_shot(ShotInfo(ts=1, by=0, speed_kmh_est=None, side=0, team=0))
+    # Image-nearest is near player 1 (the far player stands under his racket in the image),
+    # but the shot after a near shot comes from the far side: nearest far player 3.
+    shot = ShotInfo(
+        ts=2, by=1, speed_kmh_est=None, side=0, team=0, px=[450, 450], candidates=_DOUBLES
+    )
+    fsm.on_shot(shot)
+    assert (shot.by, shot.side, shot.team, shot.hitter_xy_m) == (3, 1, 1, [11.0, 5.0])
     assert fsm.shots_count == 2
+
+    # Same side again with no near player tracked: kept, side and team from alternation.
+    shot = ShotInfo(
+        ts=3, by=3, speed_kmh_est=None, side=1, team=1, px=[415, 290], candidates=_DOUBLES[2:]
+    )
+    fsm.on_shot(shot)
+    assert (shot.by, shot.side, shot.team, shot.hitter_xy_m) == (None, 0, 0, None)
+    assert fsm.shots_count == 3
     fsm.drain_events()
 
-    # Same side again with weaker evidence -> dropped.
-    fsm.on_shot(ShotInfo(ts=3, by=1, speed_kmh_est=None, side=1, evidence=0.0))
-    assert fsm.shots_count == 2
-    assert fsm.last_shot is not None and fsm.last_shot.ts == 2
-    assert fsm.drain_events() == []
-
-    # Same side with stronger evidence -> replaces the previous shot, count unchanged.
-    fsm.on_shot(ShotInfo(ts=4, by=1, speed_kmh_est=None, side=1, evidence=1.2))
-    assert fsm.shots_count == 2
+    # A stronger candidate for the same hit replaces it; the count is unchanged.
+    fsm.on_shot(ShotInfo(ts=4, by=0, speed_kmh_est=None, side=0, evidence=1.2, replaces_ts=3))
+    assert fsm.shots_count == 3
     assert fsm.last_shot is not None and fsm.last_shot.ts == 4
     (event,) = fsm.drain_events()
-    assert event["data"]["replaces_ts"] == 2
+    assert event["data"]["replaces_ts"] == 3
 
-    fsm.on_shot(ShotInfo(ts=5, by=0, speed_kmh_est=None, side=0))
-    assert fsm.shots_count == 3
+
+@pytest.mark.parametrize(
+    ("alternation", "first_evidence", "expected"),
+    [
+        ("audio", 1.6, (3, 1)),  # after an audio-confirmed shot: alternation decides
+        ("audio", 0.5, (1, 0)),  # after a vision-only shot: the detector's attribution stands
+        ("off", 1.6, (1, 0)),
+        ("always", 0.5, (3, 1)),
+    ],
+)
+def test_rally_fsm_alternation_modes(
+    alternation: str, first_evidence: float, expected: tuple[int, int]
+) -> None:
+    fsm = RallyFSM(mode="doubles", alternation=alternation)
+    fsm.on_shot(ShotInfo(ts=1, by=0, speed_kmh_est=None, side=0, team=0, evidence=first_evidence))
+    shot = ShotInfo(
+        ts=2, by=1, speed_kmh_est=None, side=0, team=0, px=[450, 450], candidates=_DOUBLES
+    )
+    fsm.on_shot(shot)
+    assert (shot.by, shot.side) == expected
+    assert fsm.shots_count == 2  # kept as a new shot in every mode
+
+
+def test_rally_fsm_rejects_unknown_alternation_mode() -> None:
+    with pytest.raises(ValueError):
+        RallyFSM(alternation="sometimes")
+
+
+def test_serve_is_attributed_by_bbox_height_normalised_distance() -> None:
+    # 50 px from a 300 px near box (0.17) beats 22 px from a 60 px far box (0.37).
+    players = [
+        {"id": 0, "side": 0, "bbox": [100, 400, 200, 700]},
+        {"id": 1, "side": 1, "bbox": [270, 380, 300, 440]},
+    ]
+    shot = ShotDetector().register_direction_change(
+        1_000_000_000, px=[250, 450], players=players, audio_degraded=True
+    )
+    assert shot is not None and (shot.by, shot.side) == (0, 0)
+
+
+def test_detector_gates_to_reach_and_keeps_stronger_of_two_candidates() -> None:
+    ms = 1_000_000
+    detector = ShotDetector(refractory_ms=300.0, reach_ratio=0.5)
+    players = [{"id": 0, "side": 0, "bbox": [100, 100, 200, 300]}]
+
+    def turn(t_ms: int, x: float) -> ShotInfo | None:
+        return detector.register_direction_change(
+            t_ms * ms, px=[x, 200], players=players, audio_degraded=True
+        )
+
+    # Beyond 0.5 bbox heights of every player: an apex or jitter, not a candidate.
+    assert turn(500, 320) is None and not detector._recent_dir_changes
+    first = turn(1_000, 250)  # 0.25 heights out
+    assert first is not None and math.isclose(first.evidence, 0.45)
+    assert turn(1_200, 280) is None  # same hit, weaker (0.4 heights)
+    second = turn(1_250, 150)  # same hit, inside the box: stronger, replaces it
+    assert second is not None and second.replaces_ts == first.ts
+    third = turn(1_600, 150)  # 350 ms later: a new hit
+    assert third is not None and third.replaces_ts is None
+    # No player with a box: no reach to test against, the turn still counts.
+    assert detector.register_direction_change(9_000 * ms, px=[0, 0], audio_degraded=True)
+
+
+def test_rally_starts_only_on_a_serve_after_a_still_shuttle() -> None:
+    ms = 1_000_000
+    fsm = RallyFSM(serve_still_ms=2000.0)
+    fsm.on_shuttle_update("tracked", [1.0, 1.0], 1_000 * ms)  # no history yet: armed
+    fsm.on_shot(ShotInfo(ts=1_100 * ms, by=0, speed_kmh_est=None))
+    fsm.on_shuttle_update("tracked", [1.0, 1.0], 1_500 * ms)
+    fsm.end_rally(1_600 * ms)
+    assert fsm.rally_n == 1
+    fsm.drain_events()
+
+    # Warm-up hits keep the shuttle flying: no 2 s of stillness, so no rally starts.
+    for t in (2_000, 2_600, 3_200):
+        fsm.on_shuttle_update("tracked", [1.0, 1.0], t * ms)
+        fsm.on_shot(ShotInfo(ts=t * ms, by=0, speed_kmh_est=None))
+    assert fsm.drain_events() == [] and not fsm.is_active
+
+    # Unseen (or at rest, which reads as lost) for 2 s, then the first shot serves.
+    fsm.on_shuttle_update("lost", None, 4_000 * ms)
+    fsm.on_shuttle_update("tracked", [1.0, 1.0], 5_200 * ms)
+    fsm.on_shot(ShotInfo(ts=5_300 * ms, by=0, speed_kmh_est=None))
+    assert fsm.is_active and fsm.rally_n == 2
+    fsm.on_shot(ShotInfo(ts=6_000 * ms, by=1, speed_kmh_est=None))
+    assert fsm.shots_count == 2  # inside the rally every shot counts
+
+
+def test_resting_shuttle_ends_the_rally_at_once() -> None:
+    ms = 1_000_000
+    fsm = RallyFSM()
+    fsm.on_shot(ShotInfo(ts=1_000 * ms, by=0, speed_kmh_est=None))
+    fsm.on_shuttle_update("tracked", [5.0, 5.0], 1_400 * ms)
+    fsm.on_shuttle_update("lost", None, 1_900 * ms, rest_px=[5.0, 6.0])  # far below end_gap
+    assert fsm.state == RallyState.END
+    kinds = [e["kind"] for e in fsm.drain_events()]
+    assert kinds == ["rally_start", "shot", "rally_end", "point_suggested"]
+    assert fsm.current_t_ms == 400
 
 
 def test_rally_end_estimates_landing_from_last_seen_point_via_homography() -> None:
@@ -412,6 +550,7 @@ def test_false_start_rally_is_closed_without_point_suggestion() -> None:
     assert [e["kind"] for e in fsm.drain_events()] == ["rally_end"]
 
     # A shot but the shuttle never seen after it: t_ms is 0, still paired with rally_end.
+    fsm.on_shuttle_update("tracked", [1.0, 1.0], 2_900 * ms)  # first flight in 2 s: a serve
     fsm.on_shot(ShotInfo(ts=3_000 * ms, by=0, speed_kmh_est=None))
     fsm.on_shuttle_update("lost", None, 5_000 * ms)
     assert fsm.state == RallyState.END
@@ -564,8 +703,9 @@ def replay(
             res = kf.update(payload is not None, payload, ts)
             fsm.on_shuttle_update(res.status, kf.last_seen_px, ts, kf.rest_px)
             if res.direction_changed:
+                # The confirmed turn, not the frame that confirmed it (proposed state.py call).
                 shot = detector.register_direction_change(
-                    ts, px=res.px, players=players, audio_degraded=not audio_ok
+                    res.turn_ts, px=res.turn_px, players=players, audio_degraded=not audio_ok
                 )
                 if shot is not None:
                     fsm.on_shot(shot)
@@ -585,7 +725,8 @@ _REPLAY_PLAYERS = [
 ]
 # Synthetic ~4 Hz shuttle stream (CPU-rate inference): near player (bottom of image) serves
 # up, far player returns at 1250 ms, the near player's return at ~2000 ms is hidden by one
-# missed message, then the shuttle leaves view. A lone false reversal follows at 10.5 s.
+# missed message, then the shuttle leaves view. A lone false reversal follows at 10.5 s: one
+# point after the turn is not a confirmed reversal, so it starts no rally.
 _REPLAY_SHUTTLE = [
     (0, [400.0, 560.0]),
     (250, [400.0, 480.0]),
@@ -622,19 +763,17 @@ def test_replay_low_rate_stream_counts_shots_and_pairs_rally_events(audio_ok: bo
     events = replay(_replay_fixture(with_hits=audio_ok), audio_ok=audio_ok)
     assert [e["kind"] for e in events] == [
         "rally_start", "shot", "shot", "rally_end", "point_suggested",
-        "rally_start", "shot", "rally_end",
     ]  # fmt: skip
     shots = [e for e in events if e["kind"] == "shot"]
-    assert [s["data"]["by"] for s in shots] == [1, 0, 0]
-    # The hit hidden by the missed message is reported on reappearance.
-    assert [s["ts"] // 1_000_000 for s in shots[:2]] == [1250, 2200 if audio_ok else 2250]
+    assert [s["data"]["by"] for s in shots] == [1, 0]
+    # The hit hidden by the missed message is reported at the first point after it.
+    assert [s["ts"] // 1_000_000 for s in shots] == [1250, 2200 if audio_ok else 2250]
     assert events[3]["data"] == {"n": 1, "t_ms": 1750, "shots": 2}
-    assert events[-1]["data"] == {"n": 2, "t_ms": 0, "shots": 1}
 
 
 def test_replay_without_direction_memory_misses_the_hidden_hit() -> None:
     events = replay(
-        _replay_fixture(with_hits=False), kf=ShuttleKalmanFilter(direction_max_gap_ms=0.0)
+        _replay_fixture(with_hits=False), kf=ShuttleKalmanFilter(direction_max_gap_ms=300.0)
     )
     first_rally_end = next(e for e in events if e["kind"] == "rally_end")
     assert first_rally_end["data"]["shots"] == 1
@@ -670,7 +809,8 @@ def test_replay_without_rest_detection_never_ends_rally() -> None:
     assert "rally_end" not in [e["kind"] for e in events]
 
 
-@pytest.mark.parametrize(("rest_ms", "expected"), [(400.0, 1), (1e9, 22)])
+# Even without rest detection the straight-run test rejects jitter (it gave 22 turns before).
+@pytest.mark.parametrize(("rest_ms", "expected"), [(400.0, 1), (1e9, 1)])
 def test_floor_jitter_gives_no_direction_changes_once_resting(
     rest_ms: float, expected: int
 ) -> None:

@@ -25,7 +25,11 @@ class ShotInfo:
     hitter_xy_m: list[float] | None = None  # hitter's court position at the hit
     side: int | None = None  # court side of the hitter, used to force alternation
     team: int | None = None
-    evidence: float = 0.0  # 0 = vision only, 1 + strength = vision matched with audio
+    # [0, 1) = vision only, scaled by racket reach; 1 + strength = vision matched with audio
+    evidence: float = 0.0
+    px: list[float] | None = None  # shuttle image point at the hit
+    candidates: list[dict[str, Any]] | None = None  # tracked players at the hit, for re-attribution
+    replaces_ts: int | None = None  # a stronger candidate for the same hit (inside the refractory)
 
 
 @dataclass(slots=True)
@@ -73,10 +77,15 @@ class ShotDetector:
     def __init__(
         self,
         match_window_ms: float = 100.0,
-        refractory_ms: float = 200.0,
+        refractory_ms: float = 300.0,
+        reach_ratio: float = 0.5,
     ) -> None:
         self.match_window_ns = int(match_window_ms * 1_000_000)
+        # Two candidates closer than this are one hit; the stronger is kept.
         self.refractory_ns = int(refractory_ms * 1_000_000)
+        # A hit happens within racket reach: shuttle-to-bbox gap <= reach_ratio x bbox height
+        # (LESSONS 5). Proposed config key: `fusion.rally.reach_ratio`.
+        self.reach_ratio = reach_ratio
 
         self._recent_hits: deque[tuple[int, float]] = deque(maxlen=16)
         self._recent_dir_changes: deque[_DirectionChange] = deque(maxlen=16)
@@ -111,14 +120,20 @@ class ShotDetector:
     ) -> ShotInfo | None:
         """Register a visual direction change at shuttle image point ``px``.
 
-        In degraded audio mode, visual direction change immediately confirms a shot.
-        Otherwise, requires an acoustic hit within <= 100ms.
+        A turn outside racket reach of every tracked player (``reach_ratio``) is no
+        candidate. In degraded audio mode, visual direction change immediately confirms a
+        shot. Otherwise, requires an acoustic hit within <= 100ms.
         """
+        gaps = [g for p in players or [] if (g := _reach_gap(px, p)) is not None]
+        if gaps and min(gaps) > self.reach_ratio:
+            return None  # out of every racket's reach: an apex, jitter or a false detection
         change = _DirectionChange(ts, px, court_xy, players)
         self._recent_dir_changes.append(change)
 
         if audio_degraded:
-            return self._confirm_shot(change, ts, 0.0)
+            # Vision-only strength: how close the turn is to a racket, below any audio match.
+            strength = 0.9 * (1.0 - min(gaps) / self.reach_ratio) if gaps else 0.0
+            return self._confirm_shot(change, ts, strength)
 
         for hit_ts, strength in list(self._recent_hits):
             if abs(ts - hit_ts) <= self.match_window_ns:
@@ -126,36 +141,30 @@ class ShotDetector:
 
         return None
 
+    @staticmethod
     def attribute_player(
-        self,
         px: list[float] | tuple[float, float] | None,
         players: list[dict[str, Any]] | None,
     ) -> dict[str, Any] | None:
         """Return the tracked player nearest the shuttle image point at hit time.
 
-        Distance is to the player's bbox (0 inside it), else to the foot point. The
-        nearest player's side is the shot side, so in doubles this is also the player
-        on that side nearest the shuttle.
+        Distance is to the player's bbox (0 inside it) divided by the bbox height, so a far
+        player standing visually under a near player's racket is not preferred for being
+        small; without a bbox it is the pixel distance to the foot point. Inside a rally the
+        rally FSM narrows ``players`` to the side alternation says is hitting.
         """
         if px is None or not players:
             return None
 
-        sx, sy = float(px[0]), float(px[1])
         best: dict[str, Any] | None = None
         min_dist = float("inf")
         for player in players:
             if player.get("id") is None:
                 continue
-            bbox = player.get("bbox")
-            if bbox is not None:
-                dx = max(bbox[0] - sx, 0.0, sx - bbox[2])
-                dy = max(bbox[1] - sy, 0.0, sy - bbox[3])
-            elif player.get("img_xy") is not None:
-                dx, dy = sx - player["img_xy"][0], sy - player["img_xy"][1]
-            else:
-                continue
-            dist = math.hypot(dx, dy)
-            if dist < min_dist:
+            dist = _reach_gap(px, player)
+            if dist is None and player.get("img_xy") is not None:
+                dist = math.hypot(px[0] - player["img_xy"][0], px[1] - player["img_xy"][1])
+            if dist is not None and dist < min_dist:
                 min_dist = dist
                 best = player
         return best
@@ -163,8 +172,13 @@ class ShotDetector:
     def _confirm_shot(
         self, change: _DirectionChange, shot_ts: int, evidence: float
     ) -> ShotInfo | None:
+        replaces_ts: int | None = None
         if shot_ts - self._last_shot_ts < self.refractory_ns:
-            return None
+            # Too close to be a second hit: keep whichever candidate has stronger evidence.
+            last = self.last_shot
+            if last is None or evidence <= last.evidence:
+                return None
+            replaces_ts = last.ts
 
         self._last_shot_ts = shot_ts
         hitter = self.attribute_player(change.px, change.players)
@@ -178,6 +192,21 @@ class ShotDetector:
             side=hitter.get("side") if hitter else None,
             team=hitter.get("team") if hitter else None,
             evidence=evidence,
+            px=change.px,
+            candidates=change.players,
+            replaces_ts=replaces_ts,
         )
         self.last_shot = shot
         return shot
+
+
+def _reach_gap(
+    px: list[float] | tuple[float, float] | None, player: dict[str, Any]
+) -> float | None:
+    """Shuttle-to-bbox distance in bbox heights (0 inside it); None without px or bbox."""
+    bbox = player.get("bbox")
+    if px is None or bbox is None:
+        return None
+    dx = max(bbox[0] - px[0], 0.0, px[0] - bbox[2])
+    dy = max(bbox[1] - px[1], 0.0, px[1] - bbox[3])
+    return math.hypot(dx, dy) / max(1.0, bbox[3] - bbox[1])

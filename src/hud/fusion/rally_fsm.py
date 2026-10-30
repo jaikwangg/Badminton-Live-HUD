@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import Any
 
 from hud.fusion.homography import transform_point
-from hud.fusion.stats import ShotInfo, drag_speed_kmh_est
+from hud.fusion.stats import ShotDetector, ShotInfo, drag_speed_kmh_est
 
 
 class RallyState(StrEnum):
@@ -39,9 +39,18 @@ class RallyFSM:
         end_gap_ms: float = 1800.0,
         landing_margin_m: float = 1.0,
         rest_landing_ms: float = 3000.0,
+        serve_still_ms: float = 2000.0,
+        alternation: str = "audio",
     ) -> None:
         if mode not in {"singles", "doubles"}:
             raise ValueError("mode must be 'singles' or 'doubles'")
+        if alternation not in {"audio", "always", "off"}:
+            raise ValueError("alternation must be 'audio', 'always' or 'off'")
+        # When the side of a shot comes from alternation: "always", "off", or "audio" = only
+        # after an audio-confirmed shot. Vision-only candidates are about half false (accuracy
+        # run 1), and one false shot would flip every later side of the rally.
+        # Proposed config key: `fusion.rally.alternation`.
+        self.alternation = alternation
         self.mode = mode
         # Image -> court homography; the caller keeps it in sync with calibration.
         self.homography = homography
@@ -53,6 +62,12 @@ class RallyFSM:
         # Proposed config key: `fusion.rally.rest_landing_ms`.
         self.rest_landing_ns = int(rest_landing_ms * 1_000_000)
         self._rest_landing_used = False
+        # A rally starts only on a serve-like shot: the first shot after the shuttle stayed
+        # unseen or at rest this long. Warm-up and handling hits mid-flow start nothing.
+        # Proposed config key: `fusion.rally.serve_still_ms`.
+        self.serve_still_ns = int(serve_still_ms * 1_000_000)
+        self._last_flight_ts: int | None = None
+        self._serve_armed = True  # unknown history at startup: let the first shot serve
         self.state: RallyState = RallyState.IDLE
         self.rally_n: int = 0
         self.shots_count: int = 0
@@ -105,6 +120,7 @@ class RallyFSM:
             self.prev_shot = None
             self.landing_xy_m_est = None
             self._rest_landing_used = False
+            self._serve_armed = False
             self._pending_events.append(
                 {"ts": ts, "kind": "rally_start", "data": {"n": self.rally_n}}
             )
@@ -118,29 +134,45 @@ class RallyFSM:
     def on_shot(self, shot: ShotInfo) -> None:
         """Record a confirmed shot; shots must alternate court sides.
 
-        Two consecutive shots from the same side mean one is spurious: keep the one
-        with stronger evidence (audio-matched beats vision-only, then audio strength).
-        Only past shots are compared, so this stays realtime.
+        When alternation applies (see ``alternation``) the side comes from the previous
+        accepted shot and the hitter is the nearest player on the opposite side, so a
+        candidate attributed to the same side is re-attributed, never dropped. Otherwise the
+        detector's attribution stands. In every mode a candidate that replaces the
+        last one (``replaces_ts``, same hit) takes its place. Only past shots are used, so
+        this stays realtime.
+
+        While no rally is active only a serve-like shot (after ``serve_still_ms`` without
+        flight) starts one; other shots are ignored.
 
         A shot's speed needs its return (LESSONS 7), so each accepted shot fills in
         ``speed_kmh_est`` of the shot it answers and reports it as ``prev_speed_kmh_est``.
         """
         if not self.is_active:
+            if not self._serve_armed:
+                return
             self.start_serve(shot.ts)
         self.state = RallyState.RALLY
 
         prev = self.last_shot
         replaces: int | None = None
-        if prev is not None and shot.side is not None and shot.side == prev.side:
-            if shot.evidence <= prev.evidence:
-                return
+        if prev is not None and shot.replaces_ts == prev.ts:
             replaces = prev.ts
         else:
             self.shots_count += 1
             self.prev_shot = prev
+        answered = self.prev_shot
+        if (
+            answered is not None
+            and answered.side is not None
+            and shot.side != 1 - answered.side
+            and (
+                self.alternation == "always"
+                or (self.alternation == "audio" and answered.evidence >= 1.0)
+            )
+        ):
+            self._reattribute(shot, 1 - answered.side, answered.team)
         self.last_shot = shot
 
-        answered = self.prev_shot
         if answered is not None:
             # Recomputed on replacement, so a spurious return never keeps its speed.
             answered.speed_kmh_est = drag_speed_kmh_est(
@@ -159,6 +191,19 @@ class RallyFSM:
             data["prev_speed_kmh_est"] = answered.speed_kmh_est
         self._pending_events.append({"ts": shot.ts, "kind": "shot", "data": data})
 
+    @staticmethod
+    def _reattribute(shot: ShotInfo, side: int, answered_team: int | None) -> None:
+        # Nearest tracked player on the alternation side; unknown hitter if none is tracked.
+        on_side = [p for p in shot.candidates or [] if p.get("side") == side]
+        hitter = ShotDetector.attribute_player(shot.px, on_side)
+        shot.side = side
+        shot.by = int(hitter["id"]) if hitter else None
+        shot.hitter_xy_m = hitter.get("court_xy_m") if hitter else None
+        if hitter is not None:
+            shot.team = hitter.get("team")
+        else:
+            shot.team = 1 - answered_team if answered_team is not None else None
+
     def on_shuttle_update(
         self,
         status: str,
@@ -168,6 +213,11 @@ class RallyFSM:
     ) -> None:
         """Feed the Kalman status, the detected image point and the rest point every frame."""
         self.last_shuttle_status = status
+        if status == "tracked":
+            # Resting reads as lost, so this gap is the time the shuttle was unseen or still.
+            if self._last_flight_ts is None or ts - self._last_flight_ts >= self.serve_still_ns:
+                self._serve_armed = True
+            self._last_flight_ts = ts
         if status == "tracked" and img_xy is not None:
             self.last_seen_px = list(img_xy)
             self.last_seen_ts = ts
@@ -189,6 +239,7 @@ class RallyFSM:
 
         self.state = RallyState.END
         self.end_ts = ts
+        self._serve_armed = False
         # Duration runs to the last sighting, not to the moment the loss was confirmed.
         last_ts = max(self.start_ts, min(ts, self.last_seen_ts))
         self.current_t_ms = (last_ts - self.start_ts) // 1_000_000
@@ -206,6 +257,10 @@ class RallyFSM:
         if self.is_active:
             self.last_seen_px = list(rest_px)
             self._rest_landing_used = True
+            # A shuttle at rest (on the floor or held) is out of play: end now, not after
+            # end_gap_ms of loss.
+            if self.shots_count >= 1:
+                self.end_rally(ts)
             return
         if self.state != RallyState.END or ts - self.end_ts > self.rest_landing_ns:
             return

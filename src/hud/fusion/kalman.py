@@ -11,6 +11,7 @@ shuttle worker publishes only inferred frames and their spacing follows inferenc
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,6 +27,10 @@ class ShuttleTrackResult:
     velocity: tuple[float, float]
     speed_px_s: float
     direction_changed: bool
+    # The confirmed turn lies turn_points accepted points back: its vertex (nearest the
+    # racket) and the ts of the first point after it. Set only when direction_changed.
+    turn_ts: int | None = None
+    turn_px: list[float] | None = None
 
 
 class ShuttleKalmanFilter:
@@ -46,7 +51,14 @@ class ShuttleKalmanFilter:
         direction_max_gap_ms: float = 500.0,
         rest_radius_px: float = 8.0,
         rest_ms: float = 400.0,
+        turn_points: int = 3,
     ) -> None:
+        # A reversal counts only when turn_points accepted points before and after the vertex
+        # each run straight: a single-point turn test fires on apexes, jitter and false
+        # detections (accuracy run 1: 137 changes in rallies for 45 shots).
+        # Proposed config key: `fusion.shuttle.turn_points`.
+        self.turn_points = max(1, turn_points)
+        self._turn_history: deque[tuple[int, float, float]] = deque(maxlen=2 * self.turn_points + 1)
         # A shuttle whose detections stay within rest_radius_px of one point for rest_ms is
         # lying on the floor (or held): not in play. Reported as 'lost' (no 'resting' status in
         # the contract), it neither counts as flight nor keeps the rally alive.
@@ -85,7 +97,6 @@ class ShuttleKalmanFilter:
 
         self._initialized = False
         self._last_ts: int | None = None
-        self._prev_velocity = (0.0, 0.0)
         self._last_observation: tuple[float, float] | None = None
         self.last_seen_ts: int | None = None
         self.status: ShuttleStatus = "lost"
@@ -106,7 +117,7 @@ class ShuttleKalmanFilter:
         self._p = np.diag([50.0, 50.0, 1_000_000.0, 1_000_000.0]).astype(np.float64)
         self._initialized = False
         self._last_ts = None
-        self._prev_velocity = (0.0, 0.0)
+        self._turn_history.clear()
         self._last_observation = None
         self.last_seen_ts = None
         self._jump_frames = 0
@@ -164,23 +175,38 @@ class ShuttleKalmanFilter:
         i = np.eye(4, dtype=np.float64)
         self._p = (i - k @ self._h) @ self._p
 
-    def _detect_direction_change(self, curr_vel: tuple[float, float]) -> bool:
-        vx1, vy1 = self._prev_velocity
-        vx2, vy2 = curr_vel
-        speed1 = math.hypot(vx1, vy1)
-        speed2 = math.hypot(vx2, vy2)
+    def _add_turn_point(self, ts: int, x: float, y: float) -> tuple[int, list[float]] | None:
+        """Add an accepted point; return the turn (ts, vertex px) once a reversal is confirmed.
 
-        # Minimum speed threshold to consider direction reliable (e.g. 50 px/s)
+        Velocities are chords over the real capture times, so the test is the same at
+        30 and 60 fps (and across a bridged gap at low inference rates).
+        """
+        history = self._turn_history
+        if history and ts - history[-1][0] > self.direction_max_gap_ns:
+            history.clear()
+        history.append((ts, x, y))
+        k = self.turn_points
+        if len(history) < 2 * k + 1:
+            return None
+        points = list(history)
+        before, after = points[: k + 1], points[k:]
+        v1, v2 = _chord(before), _chord(after)
+        if v1 is None or v2 is None or not (_straight(before, v1) and _straight(after, v2)):
+            return None
+        speed1, speed2 = math.hypot(*v1), math.hypot(*v2)
+        # Minimum speed for a reliable direction (50 px/s).
         if speed1 < 50.0 or speed2 < 50.0:
-            return False
-
-        # Cosine similarity between velocity vectors
-        dot = (vx1 * vx2 + vy1 * vy2) / (speed1 * speed2)
-        dot = max(-1.0, min(1.0, dot))
-        angle = math.acos(dot)
-
-        # Significant deflection angle indicates a stroke / hit direction change
-        return angle >= self.direction_change_rad
+            return None
+        cos = (v1[0] * v2[0] + v1[1] * v2[1]) / (speed1 * speed2)
+        if math.acos(max(-1.0, min(1.0, cos))) < self.direction_change_rad:
+            return None
+        # The vertex starts the next segment, so the same turn is never reported twice.
+        for _ in range(k):
+            history.popleft()
+        _, vx, vy = points[k]
+        # The hit lies between the vertex and the next point; that point's ts matches the
+        # timing of a single-step test, which audio matching was built around.
+        return points[k + 1][0], [vx, vy]
 
     def update(
         self,
@@ -214,6 +240,7 @@ class ShuttleKalmanFilter:
                 self.resting = True
             if self.resting:
                 # Filter state is left untouched, so the next real flight starts fresh.
+                self._turn_history.clear()
                 self.status = "lost"
                 return ShuttleTrackResult(
                     status="lost",
@@ -232,17 +259,15 @@ class ShuttleKalmanFilter:
                     and 0 < ts - self.last_seen_ts <= self.direction_max_gap_ns
                 )
                 velocity = (0.0, 0.0)
-                dir_changed = False
                 if bridged:
                     gap_s = (ts - self.last_seen_ts) / 1e9
                     last_x, last_y = self._last_observation
                     velocity = ((zx - last_x) / gap_s, (zy - last_y) / gap_s)
-                    dir_changed = self._detect_direction_change(velocity)
+                turn = self._add_turn_point(ts, zx, zy)
                 self._x = np.array([zx, zy, *velocity], dtype=np.float64)
                 self._p = np.diag([10.0, 10.0, 1_000_000.0, 1_000_000.0]).astype(np.float64)
                 self._initialized = True
                 self.status = "tracked"
-                self._prev_velocity = velocity
                 self._last_observation = (zx, zy)
                 self.last_seen_ts = ts
                 self._jump_frames = 0
@@ -251,7 +276,9 @@ class ShuttleKalmanFilter:
                     px=[zx, zy],
                     velocity=velocity,
                     speed_px_s=math.hypot(*velocity),
-                    direction_changed=dir_changed,
+                    direction_changed=turn is not None,
+                    turn_ts=turn[0] if turn else None,
+                    turn_px=turn[1] if turn else None,
                 )
 
             self._predict(dt)
@@ -287,8 +314,7 @@ class ShuttleKalmanFilter:
             self.status = "tracked"
 
             curr_vel = (float(self._x[2]), float(self._x[3]))
-            dir_changed = self._detect_direction_change(observed_velocity)
-            self._prev_velocity = observed_velocity
+            turn = self._add_turn_point(ts, zx, zy)
             self._last_observation = (zx, zy)
             self.last_seen_ts = ts
             speed = math.hypot(curr_vel[0], curr_vel[1])
@@ -298,7 +324,9 @@ class ShuttleKalmanFilter:
                 px=[float(self._x[0]), float(self._x[1])],
                 velocity=curr_vel,
                 speed_px_s=speed,
-                direction_changed=dir_changed,
+                direction_changed=turn is not None,
+                turn_ts=turn[0] if turn else None,
+                turn_px=turn[1] if turn else None,
             )
 
         # Shuttle is not visible in this frame
@@ -337,3 +365,19 @@ class ShuttleKalmanFilter:
             speed_px_s=speed,
             direction_changed=False,
         )
+
+
+def _chord(points: list[tuple[int, float, float]]) -> tuple[float, float] | None:
+    """Mean velocity (px/s) from the first to the last (ts, x, y) point."""
+    dt_s = (points[-1][0] - points[0][0]) / 1e9
+    if dt_s <= 0:
+        return None
+    return ((points[-1][1] - points[0][1]) / dt_s, (points[-1][2] - points[0][2]) / dt_s)
+
+
+def _straight(points: list[tuple[int, float, float]], chord: tuple[float, float]) -> bool:
+    """Every step moves along the chord: jitter and single outliers break the run."""
+    return all(
+        (b[1] - a[1]) * chord[0] + (b[2] - a[2]) * chord[1] > 0
+        for a, b in zip(points, points[1:], strict=False)
+    )
