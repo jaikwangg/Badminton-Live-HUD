@@ -355,7 +355,9 @@ def test_run_passes_the_configured_background_sample_span(
 ) -> None:
     config = load_config()
     config.models["shuttle"]["background_sample_span_s"] = 4.5
+    config.models["shuttle"]["crop"] = [0.0, 0.25, 1.0, 0.75]
     spans: list[float] = []
+    crops: list[object] = []
 
     class Closable:
         def __init__(self, *args: object, **kwargs: object) -> None: ...
@@ -364,8 +366,9 @@ def test_run_passes_the_configured_background_sample_span(
 
     tracker = types.SimpleNamespace(width=512, height=288)
 
-    def fake_background(*args: object, sample_span_s: float) -> None:
+    def fake_background(*args: object, sample_span_s: float, **kwargs: object) -> None:
         spans.append(sample_span_s)
+        crops.append(kwargs["crop"])
         raise RuntimeError("stop")
 
     monkeypatch.setattr(shuttle_worker, "ZmqPublisher", Closable)
@@ -376,3 +379,114 @@ def test_run_passes_the_configured_background_sample_span(
     with pytest.raises(RuntimeError, match="stop"):
         shuttle_worker.run(config)
     assert spans == [4.5]
+    assert crops == [(0.0, 0.25, 1.0, 0.75)]
+
+
+def _crop_tracker(heatmaps: np.ndarray) -> TrackNetV3Tracker:
+    return TrackNetV3Tracker(
+        "unused.onnx",
+        "onnxruntime",
+        morph_kernel_size=1,
+        min_contour_area=1,
+        max_contour_area=120,
+        session=FakeSession(heatmaps),
+    )
+
+
+@pytest.mark.parametrize(
+    ("crop", "box"),
+    [
+        (None, (0, 0, 1920, 1080)),
+        ((0.25, 0.1, 0.75, 0.9), (480, 108, 1440, 972)),
+        ((0.0, 0.0, 1.0, 1.0), (0, 0, 1920, 1080)),
+    ],
+)
+@pytest.mark.parametrize(("rows", "cols"), [((0, 3), (0, 3)), ((285, 288), (509, 512))])
+def test_crop_maps_heatmap_pixel_centres_back_to_full_frame(
+    crop: tuple[float, float, float, float] | None,
+    box: tuple[int, int, int, int],
+    rows: tuple[int, int],
+    cols: tuple[int, int],
+) -> None:
+    heatmaps = np.zeros((1, 8, 288, 512), dtype=np.float32)
+    heatmaps[0, 7, rows[0] : rows[1], cols[0] : cols[1]] = 0.9  # 3x3 blob, centroid = middle
+    tracker = _crop_tracker(heatmaps)
+    worker = ShuttleWorker(tracker, FakePublisher(), crop=crop)
+    resized = worker._resize_frame(_raw_frame(1, width=1920, height=1080))
+    x0, y0, x1, y1 = box
+    assert (resized.origin_x, resized.origin_y) == (x0, y0)
+    assert (resized.source_width, resized.source_height) == (x1 - x0, y1 - y0)
+
+    visible, px, _ = tracker.infer([resized] * 8, np.zeros((288, 512, 3), dtype=np.uint8))
+
+    assert visible is True
+    assert px == pytest.approx(
+        [
+            x0 + (cols[0] + 1 + 0.5) * (x1 - x0) / 512,
+            y0 + (rows[0] + 1 + 0.5) * (y1 - y0) / 288,
+        ]
+    )
+    assert x0 <= px[0] < x1 and y0 <= px[1] < y1
+
+
+def test_crop_resizes_only_the_cropped_region() -> None:
+    image = np.zeros((48, 64, 3), dtype=np.uint8)
+    image[12:36, 16:48] = 200  # exactly the crop below
+    frame = Frame(frame_id=1, ts=0, width=64, height=48, image=image.tobytes())
+    worker = ShuttleWorker(FakeTracker(), FakePublisher(), crop=(0.25, 0.25, 0.75, 0.75))
+
+    assert np.all(worker._resize_frame(frame).image_rgb == 200)
+
+
+def test_background_median_uses_the_same_crop() -> None:
+    background = shuttle_worker.MedianBackground(32, 18, 3, 60.0, crop=(0.25, 0.25, 0.75, 0.75))
+    frames = []
+    for value in (190, 200, 210):
+        image = np.zeros((48, 64, 3), dtype=np.uint8)
+        image[12:36, 16:48] = value
+        frames.append(Frame(frame_id=value, ts=0, width=64, height=48, image=image.tobytes()))
+
+    image = background._make_background(frames)
+
+    assert image.shape == (18, 32, 3)
+    assert np.all(image == 200)
+
+
+@pytest.mark.parametrize("crop", [[0.5, 0.0, 0.5, 1.0], [0.0, -0.1, 1.0, 1.0], [0, 0, 1]])
+def test_invalid_crop_is_rejected(crop: list[float]) -> None:
+    with pytest.raises(ValueError):
+        shuttle_worker.parse_crop(crop)
+
+
+def _first_backgrounds(warmup_span_s: float, seconds: float) -> list[float]:
+    """Feed 10 fps frames with fake capture ts; return the ts (s) of each new background."""
+    background = shuttle_worker.MedianBackground(
+        8, 4, 5, 60.0, sample_span_s=10.0, warmup_span_s=warmup_span_s
+    ).start()
+    seen: list[float] = []
+    current = None
+    try:
+        for index in range(int(seconds * 10)):
+            ts = index * 100_000_000
+            background.submit(Frame(index, ts, 8, 4, bytes([index % 256]) * (8 * 4 * 3)))
+            while not background._frames.empty():
+                Event().wait(0.0005)
+            Event().wait(0.0005)  # let the thread finish a median it may be building
+            if background.get() is not current:
+                current = background.get()
+                seen.append(ts / 1e9)
+    finally:
+        background.close()
+    return seen
+
+
+def test_fast_start_background_is_ready_after_warmup_then_widens() -> None:
+    # 5 samples over 2 s (stride 0.4 s): the 5th sample is at 1.6 s, not 8 s.
+    first, widened = _first_backgrounds(2.0, 12.0)[:2]
+    assert 1.6 <= first <= 1.75
+    # Samples restart at a 2 s stride after the warm-up median: 4 more strides = 8 s later.
+    assert 9.7 <= widened <= 9.85
+
+
+def test_without_warmup_first_background_waits_for_the_full_span() -> None:
+    assert 8.0 <= _first_backgrounds(10.0, 9.0)[0] <= 8.15

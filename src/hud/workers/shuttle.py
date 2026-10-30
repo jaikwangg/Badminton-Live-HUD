@@ -20,8 +20,39 @@ from hud.models.shuttle import ResizedFrame, ShuttleTracker, create_shuttle_trac
 
 LOGGER = logging.getLogger(__name__)
 
-# Default for MedianBackground; run() reads models.shuttle.background_sample_span_s.
+# Defaults for MedianBackground; run() reads models.shuttle.background_sample_span_s and
+# (once T01 adds it) background_warmup_span_s.
 BACKGROUND_SAMPLE_SPAN_S = 10.0
+BACKGROUND_WARMUP_SPAN_S = 2.0
+
+Crop = tuple[float, float, float, float]
+
+
+def parse_crop(value: object) -> Crop | None:
+    """models.shuttle.crop: [x0, y0, x1, y1] as frame fractions, or null for the full frame."""
+    if value is None:
+        return None
+    crop = tuple(float(v) for v in value)  # type: ignore[attr-defined]
+    if len(crop) != 4 or not (0.0 <= crop[0] < crop[2] <= 1.0 and 0.0 <= crop[1] < crop[3] <= 1.0):
+        raise ValueError(f"crop must be [x0, y0, x1, y1] fractions, x0 < x1 and y0 < y1: {value}")
+    return crop  # type: ignore[return-value]
+
+
+def crop_box(width: int, height: int, crop: Crop | None) -> tuple[int, int, int, int]:
+    """Pixel box (x0, y0, x1, y1) of the crop in a width x height frame; never empty."""
+    if crop is None:
+        return 0, 0, width, height
+    x0 = min(width - 1, round(crop[0] * width))
+    y0 = min(height - 1, round(crop[1] * height))
+    x1 = min(width, max(x0 + 1, round(crop[2] * width)))
+    y1 = min(height, max(y0 + 1, round(crop[3] * height)))
+    return x0, y0, x1, y1
+
+
+def _bgr_crop(frame: Frame, crop: Crop | None) -> np.ndarray:
+    bgr = np.frombuffer(frame.image, dtype=np.uint8).reshape(frame.height, frame.width, 3)
+    x0, y0, x1, y1 = crop_box(frame.width, frame.height, crop)
+    return bgr[y0:y1, x0:x1]
 
 
 class Publisher(Protocol):
@@ -59,14 +90,19 @@ class MedianBackground:
         sample_count: int,
         update_interval_s: float,
         sample_span_s: float = BACKGROUND_SAMPLE_SPAN_S,
+        *,
+        warmup_span_s: float = BACKGROUND_WARMUP_SPAN_S,
+        crop: Crop | None = None,
     ) -> None:
-        if sample_count < 1 or update_interval_s <= 0 or sample_span_s < 0:
+        if sample_count < 1 or update_interval_s <= 0 or sample_span_s < 0 or warmup_span_s < 0:
             raise ValueError("Background sample count and update interval must be positive")
         self.width = width
         self.height = height
         self.sample_count = sample_count
         self.update_interval_s = update_interval_s
         self.sample_span_s = sample_span_s
+        self.warmup_span_s = warmup_span_s
+        self.crop = crop
         self._frames: Queue[Frame] = Queue(maxsize=1)
         self._stop = Event()
         self._thread: Thread | None = None
@@ -103,10 +139,7 @@ class MedianBackground:
             self._thread.join(timeout=2.0)
 
     def _make_background(self, samples: list[Frame]) -> np.ndarray:
-        images = [
-            np.frombuffer(frame.image, dtype=np.uint8).reshape(frame.height, frame.width, 3)
-            for frame in samples
-        ]
+        images = [_bgr_crop(frame, self.crop) for frame in samples]
         median_bgr = np.median(np.stack(images, axis=0), axis=0).astype(np.uint8)
         median_rgb = median_bgr[:, :, ::-1]
         # Official TrackNetV3 uses PIL Image.resize with its default BICUBIC filter.
@@ -116,8 +149,11 @@ class MedianBackground:
     def _run(self) -> None:
         # Frames spaced sample_span_s / sample_count apart by capture ts, so players who
         # move within the span drop out of the median (consecutive frames kept them in).
+        # Fast start: the first median spans only warmup_span_s; the samples then restart at
+        # the full span and replace it as soon as they are complete ("widening").
         samples: deque[Frame] = deque(maxlen=self.sample_count)
-        stride_ns = int(self.sample_span_s * 1e9 / self.sample_count)
+        warming = self.warmup_span_s < self.sample_span_s
+        widening = False
         last_update = 0.0
         source_shape: tuple[int, int] | None = None
         while not self._stop.is_set():
@@ -130,15 +166,19 @@ class MedianBackground:
                 samples.clear()
                 self._background = None
                 last_update = 0.0
+                warming, widening = self.warmup_span_s < self.sample_span_s, False
             source_shape = current_shape
 
-            if samples and frame.ts - samples[-1].ts < stride_ns:
+            span_s = self.warmup_span_s if warming else self.sample_span_s
+            if samples and frame.ts - samples[-1].ts < int(span_s * 1e9 / self.sample_count):
                 continue
             samples.append(frame)
 
             now = time.monotonic()
             if len(samples) < self.sample_count or (
-                self._background is not None and now - last_update < self.update_interval_s
+                self._background is not None
+                and not widening
+                and now - last_update < self.update_interval_s
             ):
                 continue
             try:
@@ -146,6 +186,10 @@ class MedianBackground:
                 last_update = now
             except Exception:
                 LOGGER.exception("Failed to update shuttle median background")
+                continue
+            if warming:
+                samples.clear()
+            widening, warming = warming, False
 
 
 class ShuttleWorker:
@@ -157,12 +201,14 @@ class ShuttleWorker:
         max_gap: int = 1,
         background: MedianBackground | None = None,
         executor: Executor | None = None,
+        crop: Crop | None = None,
     ) -> None:
         if max_gap < 0:
             raise ValueError("max_gap must be non-negative")
         self.tracker = tracker
         self.publisher = publisher
         self.max_gap = max_gap
+        self.crop = crop
         self.background = background
         # None runs inference inline; run() passes the model-load thread so the frame
         # loop and its heartbeat never wait on a slow model.
@@ -191,16 +237,18 @@ class ShuttleWorker:
         self.last_heartbeat = now
 
     def _resize_frame(self, frame: Frame) -> ResizedFrame:
-        bgr = np.frombuffer(frame.image, dtype=np.uint8).reshape(frame.height, frame.width, 3)
-        rgb = bgr[:, :, ::-1]
+        x0, y0, x1, y1 = crop_box(frame.width, frame.height, self.crop)
+        rgb = _bgr_crop(frame, self.crop)[:, :, ::-1]
         # Match dataset.py:437-451, which loads RGB with PIL and calls Image.resize().
         resized = Image.fromarray(rgb).resize((self.tracker.width, self.tracker.height))
         return ResizedFrame(
             frame_id=frame.frame_id,
             ts=frame.ts,
-            source_width=frame.width,
-            source_height=frame.height,
+            source_width=x1 - x0,
+            source_height=y1 - y0,
             image_rgb=np.asarray(resized, dtype=np.uint8).copy(),
+            origin_x=x0,
+            origin_y=y0,
         )
 
     def _append_window(self, current: ResizedFrame) -> None:
@@ -328,6 +376,7 @@ def run(config: AppConfig) -> None:
             future_done = Event()
             future_done.wait(1.0)
         tracker = future.result()
+        crop = parse_crop(settings.get("crop"))
 
         background = MedianBackground(
             tracker.width,
@@ -335,6 +384,8 @@ def run(config: AppConfig) -> None:
             int(settings["background_sample_count"]),
             float(settings["background_update_interval_s"]),
             sample_span_s=float(settings["background_sample_span_s"]),
+            warmup_span_s=float(settings.get("background_warmup_span_s", BACKGROUND_WARMUP_SPAN_S)),
+            crop=crop,
         ).start()
         worker = ShuttleWorker(
             tracker,
@@ -342,6 +393,7 @@ def run(config: AppConfig) -> None:
             max_gap=int(settings["max_gap"]),
             background=background,
             executor=pool,
+            crop=crop,
         )
         idle_wait = Event()
         while True:
