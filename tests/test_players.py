@@ -101,7 +101,41 @@ def test_foot_uses_confident_ankles_and_falls_back_to_bbox() -> None:
     worker, publisher = _worker(detections, ankle_confidence=0.5)
     worker.process(1, 1, 200, 100, bytes(200 * 100 * 3))
     feet = [p.foot_px for p in PlayersMessage.from_json(publisher.messages[0]).players]
-    assert feet == [[15.0, 72.0], [60.0, 70.0], [120.0, 80], [170.0, 80]]
+    assert feet == [[15.0, 80], [60.0, 80], [120.0, 80], [170.0, 80]]
+
+
+def test_foot_uses_bbox_bottom_for_far_player_and_ankles_when_bbox_clipped() -> None:
+    detections = [
+        # Far player: ankles 16 px above the bbox bottom; ground contact is the bottom.
+        Det([100, 20, 110, 60], 0.9, 1, _ankles([103, 44, 0.9], [107, 44, 0.9])),
+        # Clipped bbox: confident ankles below its bottom edge win.
+        Det([0, 0, 40, 80], 0.9, 2, _ankles([10, 90, 0.9], [20, 94, 0.9])),
+    ]
+    worker, publisher = _worker(detections, ankle_confidence=0.5)
+    worker.process(1, 1, 200, 100, bytes(200 * 100 * 3))
+    feet = [p.foot_px for p in PlayersMessage.from_json(publisher.messages[0]).players]
+    assert feet == [[105.0, 60], [15.0, 92.0]]
+
+
+def test_bad_frames_are_skipped_until_failures_persist(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(players_worker.time, "monotonic", lambda: clock[0])
+    worker = PlayersWorker(FakeDetector(), FakePublisher())
+    bad = (1, 1, 0, 0, b"")  # shape (0, 0, 3) fails FakeDetector's shape assert
+    worker.process_or_skip(*bad)
+    clock[0] += 2.0
+    worker.process_or_skip(*bad)
+    out = capsys.readouterr()
+    assert out.err.count("skipped frame") == 1
+    assert json.loads(out.out.strip().splitlines()[-1])["worker"] == "players"
+    worker.process_or_skip(2, 2, 200, 100, bytes(200 * 100 * 3))  # success resets the streak
+    clock[0] += 10.0
+    worker.process_or_skip(*bad)
+    clock[0] += players_worker.MAX_FAILING_S + 0.1
+    with pytest.raises(AssertionError):
+        worker.process_or_skip(*bad)
 
 
 def test_app_is_null_without_app_config() -> None:
