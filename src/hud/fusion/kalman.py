@@ -38,7 +38,13 @@ class ShuttleKalmanFilter:
         process_noise_std: float = 120.0,
         measurement_noise_std: float = 4.0,
         direction_change_deg: float = 55.0,
+        max_px_per_s: float | None = None,
+        max_jump_frames: int = 3,
     ) -> None:
+        # max_px_per_s comes from config `shuttle.max_px_per_s`; None disables the jump gate.
+        self.max_px_per_s = max_px_per_s
+        self.max_jump_frames = max_jump_frames
+        self._jump_frames = 0
         self.max_predicted_frames = max_predicted_frames
         self.process_noise_std = process_noise_std
         self.measurement_noise_std = measurement_noise_std
@@ -60,7 +66,13 @@ class ShuttleKalmanFilter:
         self._last_ts: int | None = None
         self._prev_velocity = (0.0, 0.0)
         self._last_observation: tuple[float, float] | None = None
+        self.last_seen_ts: int | None = None
         self.status: ShuttleStatus = "lost"
+
+    @property
+    def last_seen_px(self) -> list[float] | None:
+        """Last accepted image detection; the landing estimate is taken from it."""
+        return list(self._last_observation) if self._last_observation is not None else None
 
     def reset(self) -> None:
         """Clear filter state and mark shuttle as lost."""
@@ -71,6 +83,8 @@ class ShuttleKalmanFilter:
         self._last_ts = None
         self._prev_velocity = (0.0, 0.0)
         self._last_observation = None
+        self.last_seen_ts = None
+        self._jump_frames = 0
         self.status = "lost"
 
     def _get_dt(self, ts: int) -> float:
@@ -173,6 +187,8 @@ class ShuttleKalmanFilter:
                 self.status = "tracked"
                 self._prev_velocity = (0.0, 0.0)
                 self._last_observation = (zx, zy)
+                self.last_seen_ts = ts
+                self._jump_frames = 0
                 return ShuttleTrackResult(
                     status="tracked",
                     px=[zx, zy],
@@ -182,19 +198,43 @@ class ShuttleKalmanFilter:
                 )
 
             self._predict(dt)
+            last_x, last_y = self._last_observation or (zx, zy)
+            # Velocity over the real gap since the last accepted detection, not one frame.
+            obs_dt = (
+                (ts - self.last_seen_ts) / 1e9
+                if self.last_seen_ts and ts > self.last_seen_ts
+                else dt
+            )
+            observed_velocity = ((zx - last_x) / obs_dt, (zy - last_y) / obs_dt)
+
+            if (
+                self.max_px_per_s is not None
+                and math.hypot(*observed_velocity) > self.max_px_per_s
+                and self._jump_frames < self.max_jump_frames
+            ):
+                # Implausible jump: trust the prediction, but only for a few frames so a
+                # genuine new trajectory is accepted and one bad frame never wipes the track.
+                self._jump_frames += 1
+                self.status = "predicted"
+                curr_vel = (float(self._x[2]), float(self._x[3]))
+                return ShuttleTrackResult(
+                    status="predicted",
+                    px=[float(self._x[0]), float(self._x[1])],
+                    velocity=curr_vel,
+                    speed_px_s=math.hypot(*curr_vel),
+                    direction_changed=False,
+                )
+
+            self._jump_frames = 0
             self._update(z)
             self._missed_frames = 0
             self.status = "tracked"
 
             curr_vel = (float(self._x[2]), float(self._x[3]))
-            observed_velocity = (
-                ((zx - self._last_observation[0]) / dt, (zy - self._last_observation[1]) / dt)
-                if self._last_observation is not None
-                else curr_vel
-            )
             dir_changed = self._detect_direction_change(observed_velocity)
             self._prev_velocity = observed_velocity
             self._last_observation = (zx, zy)
+            self.last_seen_ts = ts
             speed = math.hypot(curr_vel[0], curr_vel[1])
 
             return ShuttleTrackResult(

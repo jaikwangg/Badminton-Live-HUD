@@ -159,31 +159,40 @@ def test_speed_estimator_calculates_speed_over_3_to_5_frames() -> None:
     assert math.isclose(speed, 180.0, abs_tol=1.0)
 
 
-def test_player_attribution_selects_closest_player() -> None:
+def test_player_attribution_selects_player_nearest_shuttle_in_image() -> None:
     detector = ShotDetector()
     players = [
-        {"id": 0, "court_xy_m": [2.0, 3.0]},
-        {"id": 1, "court_xy_m": [11.0, 3.0]},
+        {"id": 0, "side": 0, "bbox": [100, 500, 200, 700], "img_xy": [150, 700]},
+        {"id": 1, "side": 1, "bbox": [600, 100, 650, 220], "img_xy": [625, 220]},
     ]
-    # Shuttle at [2.5, 3.1] -> closest to Player 0
-    attributed_0 = detector.attribute_player([2.5, 3.1], players)
-    assert attributed_0 == 0
+    # Inside player 0's bbox -> distance 0.
+    assert detector.attribute_player([150, 520], players)["id"] == 0
+    assert detector.attribute_player([640, 90], players)["id"] == 1
+    # No bbox: fall back to the foot point.
+    assert detector.attribute_player([600, 230], [{"id": 1, "img_xy": [625, 220]}])["id"] == 1
+    assert detector.attribute_player(None, players) is None
 
-    # Shuttle at [10.5, 2.8] -> closest to Player 1
-    attributed_1 = detector.attribute_player([10.5, 2.8], players)
-    assert attributed_1 == 1
 
-
-def test_player_attribution_supports_four_doubles_players() -> None:
+def test_doubles_hitter_is_nearest_player_on_that_side_at_hit_time() -> None:
     detector = ShotDetector()
     players = [
-        {"id": 0, "court_xy_m": [2.0, 1.0]},
-        {"id": 1, "court_xy_m": [2.0, 5.0]},
-        {"id": 2, "court_xy_m": [11.0, 1.0]},
-        {"id": 3, "court_xy_m": [10.5, 5.8]},
+        {"id": 0, "team": 0, "side": 0, "bbox": [100, 500, 200, 700]},
+        {"id": 1, "team": 0, "side": 0, "bbox": [800, 500, 900, 700]},
+        {"id": 2, "team": 1, "side": 1, "bbox": [300, 100, 340, 200]},
+        {"id": 3, "team": 1, "side": 1, "bbox": [600, 100, 640, 200]},
     ]
+    shot = detector.register_direction_change(
+        ts=1_000_000_000, px=[650, 90], players=players, audio_degraded=True
+    )
+    assert shot is not None
+    assert (shot.by, shot.side, shot.team, shot.evidence) == (3, 1, 1, 0.0)
 
-    assert detector.attribute_player([10.4, 5.7], players) == 3
+    # Audio-matched shot carries stronger evidence and the hitter of the stored change.
+    detector.register_direction_change(ts=2_000_000_000, px=[880, 520], players=players)
+    shot = detector.register_audio_hit(ts=2_030_000_000, strength=0.6)
+    assert shot is not None
+    assert (shot.by, shot.side) == (1, 0)
+    assert math.isclose(shot.evidence, 1.6)
 
 
 # ============================================================================
@@ -250,21 +259,116 @@ def test_rally_fsm_shuttle_lost_during_rally_concludes_rally() -> None:
     t += 700_000_000
     fsm.on_shot(ShotInfo(ts=t, by=1, speed_kmh_est=180.0, court_xy_m=[8.0, 2.0]))
 
-    # Mid-rally temporary occlusion: 5 frames predicted -> rally stays active
+    fsm.on_shuttle_update("tracked", [500.0, 300.0], t)
+    last_seen = t
+
+    # Mid-rally occlusion: predicted, then lost for under the end gap -> rally stays active
     for _ in range(5):
         t += 16_666_667
-        fsm.on_shuttle_update("predicted", [6.0, 2.5], t)
+        fsm.on_shuttle_update("predicted", [510.0, 310.0], t)
+    t += 1_000_000_000
+    fsm.on_shuttle_update("lost", None, t)
     assert fsm.is_active
 
-    # Shuttle lost for > 10 frames -> transitions to lost -> rally ends
+    # Shuttle reappears: still the same rally
     t += 16_666_667
+    fsm.on_shuttle_update("tracked", [520.0, 320.0], t)
+    last_seen = t
+    assert fsm.state == RallyState.RALLY
+
+    # Lost for the full end gap -> rally ends
+    t += 1_800_000_000
     fsm.on_shuttle_update("lost", None, t)
     assert fsm.state == RallyState.END
     assert not fsm.is_active
+    assert fsm.current_t_ms == (last_seen - 1_000_000_000) // 1_000_000
 
     events = fsm.drain_events()
     assert any(e["kind"] == "rally_end" for e in events)
     assert any(e["kind"] == "point_suggested" for e in events)
+
+
+def test_rally_fsm_end_returns_to_idle_and_next_serve_starts_new_rally() -> None:
+    fsm = RallyFSM()
+    fsm.on_shot(ShotInfo(ts=1_000, by=0, speed_kmh_est=None))  # IDLE -> RALLY directly
+    assert fsm.state == RallyState.RALLY
+    fsm.end_rally(2_000)
+    fsm.end_rally(3_000)  # ignored when not active
+    assert sum(e["kind"] == "rally_end" for e in fsm.drain_events()) == 1
+    fsm.reset_to_idle()
+    assert fsm.state == RallyState.IDLE
+    fsm.start_serve(4_000)
+    assert (fsm.state, fsm.rally_n, fsm.shots_count) == (RallyState.SERVE, 2, 0)
+    fsm.end_rally(5_000)  # SERVE -> END
+    fsm.start_rally(6_000)  # END -> SERVE -> RALLY
+    assert (fsm.state, fsm.rally_n) == (RallyState.RALLY, 3)
+
+
+def test_rally_fsm_shots_alternate_sides_keeping_stronger_evidence() -> None:
+    fsm = RallyFSM()
+    fsm.on_shot(ShotInfo(ts=1, by=0, speed_kmh_est=None, side=0, evidence=1.5))
+    fsm.on_shot(ShotInfo(ts=2, by=1, speed_kmh_est=None, side=1, evidence=0.0))
+    assert fsm.shots_count == 2
+    fsm.drain_events()
+
+    # Same side again with weaker evidence -> dropped.
+    fsm.on_shot(ShotInfo(ts=3, by=1, speed_kmh_est=None, side=1, evidence=0.0))
+    assert fsm.shots_count == 2
+    assert fsm.last_shot is not None and fsm.last_shot.ts == 2
+    assert fsm.drain_events() == []
+
+    # Same side with stronger evidence -> replaces the previous shot, count unchanged.
+    fsm.on_shot(ShotInfo(ts=4, by=1, speed_kmh_est=None, side=1, evidence=1.2))
+    assert fsm.shots_count == 2
+    assert fsm.last_shot is not None and fsm.last_shot.ts == 4
+    (event,) = fsm.drain_events()
+    assert event["data"]["replaces_ts"] == 2
+
+    fsm.on_shot(ShotInfo(ts=5, by=0, speed_kmh_est=None, side=0))
+    assert fsm.shots_count == 3
+
+
+def test_rally_end_estimates_landing_from_last_seen_point_via_homography() -> None:
+    identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    fsm = RallyFSM(mode="doubles", homography=identity)
+    fsm.on_shot(ShotInfo(ts=1_000, by=1, speed_kmh_est=None, side=0, team=0))
+    fsm.on_shuttle_update("tracked", [9.0, 3.0], 2_000)
+    assert fsm.landing_xy_m_est is None  # null while the shuttle is in flight
+    fsm.on_shuttle_update("predicted", [9.5, 3.0], 3_000)  # predictions are not landings
+    fsm.end_rally(4_000)
+
+    assert fsm.landing_xy_m_est == [9.0, 3.0]
+    suggestion = fsm.drain_events()[-1]["data"]
+    assert suggestion["suggested_side"] == 0
+    assert suggestion["suggested_team"] == 0
+
+    fsm.start_serve(5_000)
+    assert fsm.landing_xy_m_est is None
+
+
+def test_kalman_rejects_jumps_for_at_most_three_frames() -> None:
+    kf = ShuttleKalmanFilter(max_px_per_s=3000.0)
+    dt_ns = 16_666_667
+    for i in range(5):
+        kf.update(True, [100.0 + i * 10.0, 200.0], i * dt_ns)  # 600 px/s
+
+    # A far-away false detection is replaced by the prediction for 3 frames.
+    for i in range(5, 8):
+        res = kf.update(True, [1500.0, 900.0], i * dt_ns)
+        assert res.status == "predicted"
+        assert res.px is not None and res.px[0] < 200.0
+    assert kf.last_seen_px == [140.0, 200.0]
+
+    # The 4th consecutive jump is accepted: a real new trajectory is not blocked forever.
+    res = kf.update(True, [1500.0, 900.0], 8 * dt_ns)
+    assert res.status == "tracked"
+    assert kf.last_seen_px == [1500.0, 900.0]
+
+    # A single outlier does not wipe the track.
+    kf.update(True, [1510.0, 900.0], 9 * dt_ns)
+    kf.update(True, [100.0, 100.0], 10 * dt_ns)
+    res = kf.update(True, [1530.0, 900.0], 11 * dt_ns)
+    assert res.status == "tracked"
 
 
 def test_point_suggested_in_bounds_and_out_bounds() -> None:
@@ -286,34 +390,34 @@ def test_point_suggested_in_bounds_and_out_bounds() -> None:
 
     # Case 3: Landed OUT over Side 1 backline ([14.2, 3.0]), hit by Player 0 -> Side 1 wins point
     sugg_out = fsm._evaluate_point_suggestion(
-        [14.2, 3.0], last_shot=ShotInfo(ts=0, by=0, speed_kmh_est=None)
+        [14.2, 3.0], last_shot=ShotInfo(ts=0, by=0, speed_kmh_est=None, side=0)
     )
     assert sugg_out["in_bounds"] is False
     assert sugg_out["suggested_side"] == 1
 
     # Case 4: Landed OUT across singles sideline ([5.0, 0.20]), hit by Player 1 -> Side 0 wins point
     sugg_side_out = fsm._evaluate_point_suggestion(
-        [5.0, 0.20], last_shot=ShotInfo(ts=0, by=1, speed_kmh_est=None)
+        [5.0, 0.20], last_shot=ShotInfo(ts=0, by=1, speed_kmh_est=None, side=1)
     )
     assert sugg_side_out["in_bounds"] is False
     assert sugg_side_out["suggested_side"] == 0
     assert sugg_side_out["landing_xy_m_est"] == [5.0, 0.2]
 
 
-def test_doubles_point_suggestions_use_full_court_width_and_player_sides() -> None:
-    fsm = RallyFSM(mode="doubles", player_sides={0: 0, 1: 0, 2: 1, 3: 1})
+def test_doubles_point_suggestions_use_full_court_width_and_hitter_side() -> None:
+    fsm = RallyFSM(mode="doubles")
+    # Player 2 (team 0) is on side 1 now: side, not id or team, decides out calls.
+    hit = ShotInfo(ts=0, by=2, speed_kmh_est=None, side=1, team=0)
 
-    landed_in_doubles_alley = fsm._evaluate_point_suggestion(
-        [5.0, 0.20], last_shot=ShotInfo(ts=0, by=2, speed_kmh_est=None)
-    )
+    landed_in_doubles_alley = fsm._evaluate_point_suggestion([5.0, 0.20], last_shot=hit)
     assert landed_in_doubles_alley["in_bounds"] is True
     assert landed_in_doubles_alley["suggested_side"] == 1
+    assert landed_in_doubles_alley["suggested_team"] == 0
 
-    landed_outside_doubles_sideline = fsm._evaluate_point_suggestion(
-        [5.0, -0.01], last_shot=ShotInfo(ts=0, by=2, speed_kmh_est=None)
-    )
+    landed_outside_doubles_sideline = fsm._evaluate_point_suggestion([5.0, -0.01], last_shot=hit)
     assert landed_outside_doubles_sideline["in_bounds"] is False
     assert landed_outside_doubles_sideline["suggested_side"] == 0
+    assert landed_outside_doubles_sideline["suggested_team"] == 1
 
 
 def test_rally_fsm_rejects_unknown_mode() -> None:

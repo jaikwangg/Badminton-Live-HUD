@@ -21,6 +21,17 @@ class ShotInfo:
     speed_kmh_est: float | None
     type: str | None = None
     court_xy_m: list[float] | None = None
+    side: int | None = None  # court side of the hitter, used to force alternation
+    team: int | None = None
+    evidence: float = 0.0  # 0 = vision only, 1 + strength = vision matched with audio
+
+
+@dataclass(slots=True)
+class _DirectionChange:
+    ts: int
+    px: list[float] | None
+    court_xy: list[float] | None
+    players: list[dict[str, Any]] | None
 
 
 class SpeedEstimator:
@@ -93,7 +104,7 @@ class ShotDetector:
         self.refractory_ns = int(refractory_ms * 1_000_000)
 
         self._recent_hits: deque[tuple[int, float]] = deque(maxlen=16)
-        self._recent_dir_changes: deque[tuple[int, list[float] | None]] = deque(maxlen=16)
+        self._recent_dir_changes: deque[_DirectionChange] = deque(maxlen=16)
 
         self._last_shot_ts: int = -self.refractory_ns
         self.speed_estimator = SpeedEstimator(min_frames=3, max_frames=5)
@@ -110,10 +121,9 @@ class ShotDetector:
         """Register an acoustic hit event. Returns ShotInfo if matching visual change found."""
         self._recent_hits.append((ts, strength))
 
-        # Check if there is an existing visual direction change within 100ms
-        for dir_ts, court_xy in list(self._recent_dir_changes):
-            if abs(ts - dir_ts) <= self.match_window_ns:
-                return self._confirm_shot(shot_ts=min(ts, dir_ts), court_xy=court_xy)
+        for change in list(self._recent_dir_changes):
+            if abs(ts - change.ts) <= self.match_window_ns:
+                return self._confirm_shot(change, min(ts, change.ts), 1.0 + strength)
 
         return None
 
@@ -122,73 +132,81 @@ class ShotDetector:
         ts: int,
         court_xy: list[float] | None = None,
         *,
+        px: list[float] | None = None,
         audio_degraded: bool = False,
         players: list[dict[str, Any]] | None = None,
     ) -> ShotInfo | None:
-        """Register a visual direction change.
+        """Register a visual direction change at shuttle image point ``px``.
 
         In degraded audio mode, visual direction change immediately confirms a shot.
         Otherwise, requires an acoustic hit within <= 100ms.
         """
-        self._recent_dir_changes.append((ts, court_xy))
+        change = _DirectionChange(ts, px, court_xy, players)
+        self._recent_dir_changes.append(change)
 
         if audio_degraded:
-            # Degraded mode: count purely from visual direction change
-            return self._confirm_shot(shot_ts=ts, court_xy=court_xy, players=players)
+            return self._confirm_shot(change, ts, 0.0)
 
-        # Standard mode: check for matching acoustic hit within 100ms
-        for hit_ts, _ in list(self._recent_hits):
+        for hit_ts, strength in list(self._recent_hits):
             if abs(ts - hit_ts) <= self.match_window_ns:
-                return self._confirm_shot(
-                    shot_ts=min(ts, hit_ts), court_xy=court_xy, players=players
-                )
+                return self._confirm_shot(change, min(ts, hit_ts), 1.0 + strength)
 
         return None
 
     def attribute_player(
         self,
-        court_xy: list[float] | tuple[float, float] | None,
+        px: list[float] | tuple[float, float] | None,
         players: list[dict[str, Any]] | None,
-    ) -> int | None:
-        """Determine which player executed the stroke based on proximity to shuttle court_xy."""
-        if court_xy is None or not players:
+    ) -> dict[str, Any] | None:
+        """Return the tracked player nearest the shuttle image point at hit time.
+
+        Distance is to the player's bbox (0 inside it), else to the foot point. The
+        nearest player's side is the shot side, so in doubles this is also the player
+        on that side nearest the shuttle.
+        """
+        if px is None or not players:
             return None
 
-        sx, sy = float(court_xy[0]), float(court_xy[1])
-        closest_id: int | None = None
+        sx, sy = float(px[0]), float(px[1])
+        best: dict[str, Any] | None = None
         min_dist = float("inf")
-
         for player in players:
-            player_id = player.get("id")
-            p_court = player.get("court_xy_m")
-            if player_id is not None and p_court is not None:
-                dist = math.hypot(sx - float(p_court[0]), sy - float(p_court[1]))
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_id = int(player_id)
-
-        return closest_id
+            if player.get("id") is None:
+                continue
+            bbox = player.get("bbox")
+            if bbox is not None:
+                dx = max(bbox[0] - sx, 0.0, sx - bbox[2])
+                dy = max(bbox[1] - sy, 0.0, sy - bbox[3])
+            elif player.get("img_xy") is not None:
+                dx, dy = sx - player["img_xy"][0], sy - player["img_xy"][1]
+            else:
+                continue
+            dist = math.hypot(dx, dy)
+            if dist < min_dist:
+                min_dist = dist
+                best = player
+        return best
 
     def _confirm_shot(
-        self,
-        shot_ts: int,
-        court_xy: list[float] | None = None,
-        players: list[dict[str, Any]] | None = None,
+        self, change: _DirectionChange, shot_ts: int, evidence: float
     ) -> ShotInfo | None:
         if shot_ts - self._last_shot_ts < self.refractory_ns:
             return None
 
         self._last_shot_ts = shot_ts
-        player_id = self.attribute_player(court_xy, players)
+        hitter = self.attribute_player(change.px, change.players)
 
-        if court_xy is not None:
-            self.speed_estimator.start_sampling(shot_ts, court_xy)
+        if change.court_xy is not None:
+            self.speed_estimator.start_sampling(shot_ts, change.court_xy)
 
         shot = ShotInfo(
             ts=shot_ts,
-            by=player_id,
+            by=int(hitter["id"]) if hitter else None,
             speed_kmh_est=None,
-            court_xy_m=court_xy,
+            court_xy_m=change.court_xy,
+            side=hitter.get("side") if hitter else None,
+            team=hitter.get("team") if hitter else None,
+            evidence=evidence,
         )
         self.last_shot = shot
         return shot
