@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import shutil
+import struct
 import subprocess
 import threading
 import time
@@ -27,19 +28,23 @@ LOGGER = logging.getLogger(__name__)
 StatusCallback = Callable[[str, str | None], None]
 
 
-def empty_game_state(ts: int) -> dict[str, Any]:
+def empty_game_state(ts: int, mode: str = "singles") -> dict[str, Any]:
     """Return the latest Contract v1 state with explicit unknowns."""
+    if mode not in ("singles", "doubles"):
+        raise ValueError("mode must be singles or doubles")
     return {
         "v": 1,
         "ts": ts,
-        "match": {"mode": "singles", "score": [None, None], "games": [None, None], "server": None},
+        "match": {"mode": mode, "score": [None, None], "games": [None, None], "server": None},
         "rally": {"active": False, "n": 0, "t_ms": 0, "shots": 0},
         "players": [
             {
                 "id": player_id,
                 "name": None,
                 "color": None,
-                "side": None,
+                # Same slot defaults as fusion (team/side = id % 2) until the operator sets them.
+                "team": player_id % 2,
+                "side": player_id % 2,
                 "tracked": False,
                 "img_xy": None,
                 "bbox": None,
@@ -47,7 +52,7 @@ def empty_game_state(ts: int) -> dict[str, Any]:
                 "speed_mps": None,
                 "dist_m": None,
             }
-            for player_id in range(2)
+            for player_id in range(2 if mode == "singles" else 4)
         ],
         "shuttle": {
             "status": "lost",
@@ -64,6 +69,35 @@ def empty_game_state(ts: int) -> dict[str, Any]:
             "workers": {"players": "down", "shuttle": "down", "audio": "down"},
         },
     }
+
+
+# Slot header layout from CONTRACTS.md "Frame bus": frame_id, ts, width, height, seq.
+_SLOT_HEADER = struct.Struct("<QqHHQ")
+
+
+def read_new_frames(bus: SharedFrameRing, after_id: int | None) -> list[Frame]:
+    """Return every stable ring frame newer than `after_id`, oldest first.
+
+    `read_latest` only yields the newest slot, so a poll that wakes late (Windows timers tick
+    at ~15.6 ms) loses the frames in between. With `after_id=None` only the newest is returned.
+    """
+    # ponytail: per-slot read lives here because bus/ is owned by T01; move to
+    # SharedFrameRing (e.g. read_since) once T01 adds it.
+    frames: list[Frame] = []
+    for slot in range(bus.slots):
+        offset = slot * bus.slot_size
+        frame_id, ts, width, height, seq = _SLOT_HEADER.unpack_from(bus.shm.buf, offset)
+        if not frame_id or seq % 2 or (after_id is not None and frame_id <= after_id):
+            continue
+        start = offset + _SLOT_HEADER.size
+        image = bytes(bus.shm.buf[start : start + width * height * 3])
+        check = _SLOT_HEADER.unpack_from(bus.shm.buf, offset)
+        # A changed seq means the writer reused this slot for a newer frame mid-copy; that
+        # newer frame is picked up on the next poll, the overwritten one is gone either way.
+        if check[4] == seq and check[0] == frame_id:
+            frames.append(Frame(frame_id, ts, width, height, image))
+    frames.sort(key=lambda frame: frame.frame_id)
+    return frames if after_id is not None else frames[-1:]
 
 
 class VideoEncoder:
@@ -237,6 +271,10 @@ class Recorder:
         self._last_frame_image: bytes | None = None
         self._frame_count = 0
         self._dropped_frames = 0
+        self._gap_log_interval_s = float(config.recording.get("gap_log_interval_s", 10.0))
+        self._last_gap_log_at = -math.inf
+        self._unlogged_gaps = 0
+        self._unlogged_gap_frames = 0
         self._segment_start_number = 0
         self._encoder: VideoEncoder | None = None
         self._events: Any = None
@@ -328,7 +366,6 @@ class Recorder:
             self._set_status(
                 "degraded", "free disk space is below the configured minimum; waiting for space"
             )
-            self._send_heartbeat_if_due(force=True)
             return False
         if self.status == "degraded":
             self._set_status("ok", None)
@@ -350,6 +387,25 @@ class Recorder:
             encoded = json.dumps(_json_safe(row), separators=(",", ":"), allow_nan=False)
         self._events.write(encoded + "\n")
 
+    def _log_gap(self, gap: int, frame_id: int) -> None:
+        """Summarize skipped frames at most once per interval instead of once per gap."""
+        self._unlogged_gaps += 1
+        self._unlogged_gap_frames += gap
+        now = time.monotonic()
+        if now - self._last_gap_log_at < self._gap_log_interval_s:
+            return
+        LOGGER.warning(
+            "Frame bus skipped %s frame(s) in %s gap(s) since last report (latest before "
+            "frame_id=%s, %s dropped in total)",
+            self._unlogged_gap_frames,
+            self._unlogged_gaps,
+            frame_id,
+            self._dropped_frames,
+        )
+        self._unlogged_gaps = 0
+        self._unlogged_gap_frames = 0
+        self._last_gap_log_at = now
+
     def _record_frame(self, frame: Frame, state_updates: list[dict[str, Any]]) -> None:
         started_ns = time.perf_counter_ns()
         if self.output_dir is None:
@@ -359,11 +415,7 @@ class Recorder:
         gap = 0 if self._last_frame_id is None else max(0, frame.frame_id - self._last_frame_id - 1)
         if gap:
             self._dropped_frames += gap
-            LOGGER.warning(
-                "Frame bus skipped %s frame(s) before frame_id=%s",
-                gap,
-                frame.frame_id,
-            )
+            self._log_gap(gap, frame.frame_id)
             if self._last_frame_image is not None and self._last_frame_id is not None:
                 for missing_id in range(self._last_frame_id + 1, frame.frame_id):
                     self._encoder.write(self._last_frame_image)
@@ -438,10 +490,13 @@ class Recorder:
                 return messages
 
     async def _heartbeat_loop(self) -> None:
+        # The only periodic sender: waking relative to the last send means an out-of-band
+        # (forced) heartbeat never gets a second periodic one right behind it.
         while not self._stopping.is_set():
-            self._send_heartbeat_if_due(force=True)
+            self._send_heartbeat_if_due()
+            remaining = 1.0 - (time.monotonic() - self._last_heartbeat_at)
             try:
-                await asyncio.wait_for(self._stopping.wait(), timeout=1.0)
+                await asyncio.wait_for(self._stopping.wait(), timeout=max(remaining, 0.01))
             except TimeoutError:
                 pass
 
@@ -459,13 +514,14 @@ class Recorder:
     async def _wait_for_disk_space(self) -> None:
         retry_s = float(self.config.recording["disk_retry_interval_s"])
         while not self._stopping.is_set():
-            self._send_heartbeat_if_due()
             try:
                 if await asyncio.to_thread(self._check_disk_space):
                     return
             except Exception:
                 LOGGER.exception("Disk space check failed; recorder remains degraded")
                 self._set_status("degraded", "disk space check failed")
+            # Report degradation now (from the event loop, never from the worker thread).
+            self._send_heartbeat_if_due(force=True)
             try:
                 await asyncio.wait_for(self._stopping.wait(), timeout=retry_s)
             except TimeoutError:
@@ -493,17 +549,17 @@ class Recorder:
             state_task = asyncio.create_task(self._read_game_states(ws_url))
             heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             idle_wait = 1 / max(self.config.source.fps, 1.0)
+            pending: list[Frame] = []
             while not self._stopping.is_set():
-                self._send_heartbeat_if_due()
-                frame = await asyncio.to_thread(bus.read_latest)
-                if frame is None or (
-                    self._last_frame_id is not None and frame.frame_id <= self._last_frame_id
-                ):
+                if not pending:
+                    pending = await asyncio.to_thread(read_new_frames, bus, self._last_frame_id)
+                if not pending:
                     try:
                         await asyncio.wait_for(self._stopping.wait(), timeout=idle_wait)
                     except TimeoutError:
                         pass
                     continue
+                frame = pending.pop(0)
                 try:
                     if time.monotonic() - self._last_disk_check >= float(
                         self.config.recording["disk_check_interval_s"]

@@ -4,16 +4,21 @@ import asyncio
 import io
 import json
 import subprocess
+import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import yaml
 
 from hud.bus.messages import Frame
+from hud.bus.shm_ring import SharedFrameRing
 from hud.config import AppConfig
+from hud.fusion.state import validate_game_state
 from hud.recorder import writer
-from hud.recorder.writer import Recorder, VideoEncoder, empty_game_state
+from hud.recorder.writer import Recorder, VideoEncoder, empty_game_state, read_new_frames
 
 
 class FakeEncoder:
@@ -190,6 +195,84 @@ def test_snapshot_is_merged_and_empty_state_uses_current_schema(tmp_path: Path) 
     assert "court_xy_m" not in state["shuttle"]
     assert state["health"]["fps"] is None
     assert state["ts"] == 123
+
+
+@pytest.mark.parametrize(("mode", "count"), [("singles", 2), ("doubles", 4)])
+def test_empty_game_state_is_contract_valid(mode: str, count: int) -> None:
+    state = empty_game_state(5, mode)
+
+    validate_game_state(state)
+    assert state["match"]["mode"] == mode
+    assert [player["id"] for player in state["players"]] == list(range(count))
+    assert all(
+        player["tracked"] is False and player["img_xy"] is None and player["court_xy_m"] is None
+        for player in state["players"]
+    )
+    with pytest.raises(ValueError):
+        empty_game_state(5, "mixed")
+
+
+def test_per_slot_read_never_skips_when_frames_outpace_the_poll() -> None:
+    ring = SharedFrameRing(f"hud_test_{uuid.uuid4().hex}", 2, 1)
+    try:
+        image = np.zeros((1, 2, 3), dtype=np.uint8)
+        assert read_new_frames(ring, None) == []
+        ring.write(image, 1)
+        ring.write(image, 2)
+        assert [frame.frame_id for frame in read_new_frames(ring, None)] == [2]  # newest only
+        seen = [2]
+        for burst in (3, 4, 1, 4):  # up to a full ring between polls
+            for _ in range(burst):
+                ring.write(image, time.monotonic_ns())
+            seen.extend(frame.frame_id for frame in read_new_frames(ring, seen[-1]))
+        assert seen == list(range(2, 15))
+
+        # A slot mid-write (odd seq) is skipped rather than read torn.
+        ring.write(np.zeros((1, 2, 3), dtype=np.uint8), 0)
+        slot = 15 % ring.slots
+        header = list(writer._SLOT_HEADER.unpack_from(ring.shm.buf, slot * ring.slot_size))
+        header[4] += 1
+        writer._SLOT_HEADER.pack_into(ring.shm.buf, slot * ring.slot_size, *header)
+        assert read_new_frames(ring, 14) == []
+    finally:
+        ring.close()
+        ring.unlink()
+
+
+def test_heartbeat_loop_does_not_repeat_a_just_sent_heartbeat(tmp_path: Path) -> None:
+    beats: list[str] = []
+    recorder = Recorder(_config(tmp_path), heartbeat_callback=beats.append)
+
+    async def run() -> None:
+        recorder._send_heartbeat_if_due(force=True)  # e.g. a status-change heartbeat
+        task = asyncio.create_task(recorder._heartbeat_loop())
+        await asyncio.sleep(0.2)
+        recorder.stop()
+        await task
+
+    asyncio.run(run())
+    assert len(beats) == 1
+
+
+def test_frame_gap_warnings_are_rate_limited(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    recorder = Recorder(_config(tmp_path))
+    recorder._create_session_directory()
+    recorder._encoder = FakeEncoder()  # type: ignore[assignment]
+
+    with caplog.at_level("WARNING", logger=writer.LOGGER.name):
+        for frame_id in range(1, 200, 2):  # every other frame missing: 99 gaps
+            recorder._record_frame(_frame(frame_id, frame_id), [])
+        recorder._last_gap_log_at -= recorder._gap_log_interval_s
+        recorder._record_frame(_frame(203, 203), [])
+    recorder._events.close()
+
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len(warnings) == 2
+    assert "skipped 1 frame(s) in 1 gap(s)" in warnings[0]
+    assert "skipped 101 frame(s) in 99 gap(s)" in warnings[1]
+    assert recorder._dropped_frames == 102
 
 
 def test_reader_catches_timeout_value_error_and_other_exceptions(
