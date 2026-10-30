@@ -56,6 +56,17 @@ supervisor:
   heartbeat_timeout_s: 3
   poll_interval_s: 0.25
   startup_grace_s: 30  # seconds a fresh worker may load (e.g. a model) before its first heartbeat
+fusion:
+  identity:
+    app_window_frames: 90   # ~±45 frames per LESSONS §4; past frames only
+    app_weight_m: 2.0       # metres of cost per unit L1 appearance distance; not tuned
+    side_mismatch_cost: 100 # larger than any court distance + appearance term
+  rally:
+    end_gap_ms: 1800        # LESSONS §6
+    shot_match_window_ms: 100
+    shot_refractory_ms: 200
+  shuttle:
+    max_px_per_s: null      # jump filter off until measured on real clips (needs measurement)
 server:
   ws_port: 8765
   http_port: 8080
