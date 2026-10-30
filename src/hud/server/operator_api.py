@@ -32,9 +32,15 @@ def create_operator_app(state: FusionState) -> Any:
     async def players(payload: dict[str, Any]) -> dict[str, bool]:
         try:
             values = payload["players"]
-            if any(set(item) != {"id", "name", "color", "side"} for item in values):
-                raise ValueError("Each player must include id, name, color, and side")
-            state.set_players(values)
+            # `team` is optional for legacy clients and then defaults to the starting side.
+            if any(
+                not {"id", "name", "color", "side"}
+                <= set(item)
+                <= {"id", "name", "color", "team", "side"}
+                for item in values
+            ):
+                raise ValueError("Each player must include id, name, color, team, and side")
+            state.set_players(values, payload.get("mode", "singles"))
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"ok": True}
@@ -42,7 +48,8 @@ def create_operator_app(state: FusionState) -> Any:
     @app.post("/api/score")
     async def score(payload: dict[str, Any]) -> dict[str, bool]:
         try:
-            state.add_score(int(payload["side"]), int(payload["delta"]))
+            team = payload["team"] if "team" in payload else payload["side"]
+            state.add_score(int(team), int(payload["delta"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"ok": True}

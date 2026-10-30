@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from hud.bus.messages import HeartbeatMessage, HitMessage, PlayersMessage, ShuttleMessage
-from hud.fusion.homography import load_homography, transform_point
+from hud.fusion.homography import COURT_LENGTH_M, load_homography, transform_point
 
 _WORKERS = ("players", "shuttle", "audio")
+_NET_X_M = COURT_LENGTH_M / 2
 
 
 def validate_game_state(value: dict[str, Any]) -> None:
@@ -35,12 +36,12 @@ def validate_game_state(value: dict[str, Any]) -> None:
     expected_players = 2 if mode == "singles" else 4
     if len(value["players"]) != expected_players:
         raise ValueError(f"{mode.title()} GameState must contain {expected_players} player slots")
-    side_counts = [0, 0]
     for player_id, player in enumerate(value["players"]):
         required = {
             "id",
             "name",
             "color",
+            "team",
             "side",
             "tracked",
             "img_xy",
@@ -51,18 +52,15 @@ def validate_game_state(value: dict[str, Any]) -> None:
         }
         if set(player) != required or player["id"] != player_id:
             raise ValueError("Invalid player schema")
-        if player["side"] not in (0, 1):
-            raise ValueError("Every player side must be 0 or 1")
-        side_counts[player["side"]] += 1
+        if player["side"] not in (0, 1) or player["team"] not in (0, 1):
+            raise ValueError("Every player side and team must be 0 or 1")
         court_xy = player["court_xy_m"]
         if court_xy is not None:
             lower_y, upper_y = (0.0, 6.10) if mode == "doubles" else (0.46, 5.64)
             if len(court_xy) != 2 or not lower_y <= court_xy[1] <= upper_y:
                 raise ValueError(f"Player court y is outside the {mode} sidelines")
-    if any(count not in (1, 2) for count in side_counts):
-        raise ValueError("Each side must have one or two players")
     shuttle = value["shuttle"]
-    if set(shuttle) != {"status", "img_xy", "court_xy_m", "last_shot"}:
+    if set(shuttle) != {"status", "img_xy", "landing_xy_m_est", "last_shot"}:
         raise ValueError("Invalid shuttle fields")
     if shuttle["status"] not in {"tracked", "predicted", "lost"}:
         raise ValueError("Invalid shuttle status")
@@ -99,7 +97,8 @@ class FusionState:
         self._shuttle: dict[str, Any] = {
             "status": "lost",
             "img_xy": None,
-            "court_xy_m": None,
+            # Stays null until landing estimation exists; a flying shuttle has no court xy.
+            "landing_xy_m_est": None,
             "last_shot": {"by": None, "speed_kmh_est": None, "type": None},
         }
         self._rally = {"active": False, "n": 0, "t_ms": 0, "shots": 0}
@@ -121,7 +120,7 @@ class FusionState:
         now = time.monotonic()
         with self._lock:
             if kind == "players":
-                decoded = PlayersMessage.from_json(payload)
+                decoded = PlayersMessage.from_json(payload)  # `app` is parsed but unused here
                 self._record_latency(decoded.ts)
                 if self._last_frame_id is not None and decoded.frame_id > self._last_frame_id + 1:
                     self._dropped += decoded.frame_id - self._last_frame_id - 1
@@ -131,7 +130,8 @@ class FusionState:
                     elapsed = self._frame_times[-1] - self._frame_times[0]
                     self._fps = (len(self._frame_times) - 1) / elapsed if elapsed else 0.0
                 for player in self._players.values():
-                    player["tracked"] = False
+                    # Keep speed_mps so EMA smoothing survives; position fields go null.
+                    player.update(tracked=False, img_xy=None, bbox=None, court_xy_m=None)
                 current_track_ids = {
                     detection.track_id
                     for detection in decoded.players
@@ -151,39 +151,45 @@ class FusionState:
                         if self.homography is not None
                         else None
                     )
+                    side = None if court_xy is None else int(court_xy[0] > _NET_X_M)
                     if track_id not in self._track_to_id:
                         occupied = set(self._track_to_id.values())
                         available = set(range(self._player_count)) - occupied
                         if not available:
                             continue
+                        # Prefer free slots on the detection's side of the net.
+                        candidates = [
+                            slot for slot in available if self._slot_side(slot) == side
+                        ] or list(available)
                         self._track_to_id[track_id] = min(
-                            available, key=lambda slot: self._slot_distance(slot, court_xy)
+                            candidates, key=lambda slot: self._slot_distance(slot, court_xy)
                         )
                     player_id = self._track_to_id[track_id]
+                    previous_player = self._players.get(player_id, {})
                     speed: float | None = None
-                    distance: float | None = None
+                    distance: float | None = previous_player.get("dist_m")
                     previous = self._player_history.get(player_id)
                     if previous and court_xy:
                         prev_ts, prev_x, prev_y = previous
                         elapsed_s = (decoded.ts - prev_ts) / 1_000_000_000
                         if elapsed_s > 0:
-                            measured = (
-                                (court_xy[0] - prev_x) ** 2 + (court_xy[1] - prev_y) ** 2
-                            ) ** 0.5 / elapsed_s
-                            old = self._players.get(player_id, {}).get("speed_mps")
-                            speed = measured if old is None else 0.35 * measured + 0.65 * old
-                            old_dist = self._players.get(player_id, {}).get("dist_m")
                             step = (
                                 (court_xy[0] - prev_x) ** 2 + (court_xy[1] - prev_y) ** 2
                             ) ** 0.5
-                            distance = (old_dist or 0.0) + step
-                    self._player_history[player_id] = (decoded.ts, *(court_xy or (0.0, 0.0)))
+                            measured = step / elapsed_s
+                            old = previous_player.get("speed_mps")
+                            speed = measured if old is None else 0.35 * measured + 0.65 * old
+                            distance = (distance or 0.0) + step
+                    # Off-court feet have no court position; keep the last valid one instead.
+                    if court_xy is not None:
+                        self._player_history[player_id] = (decoded.ts, *court_xy)
                     metadata = self._player_config.get(player_id, {})
                     self._players[player_id] = {
                         "id": player_id,
                         "name": metadata.get("name"),
                         "color": metadata.get("color"),
-                        "side": metadata.get("side", player_id % 2),
+                        "team": metadata.get("team", player_id % 2),
+                        "side": self._slot_side(player_id) if side is None else side,
                         "tracked": True,
                         "img_xy": detection.foot_px,
                         "bbox": detection.bbox,
@@ -194,15 +200,9 @@ class FusionState:
             elif kind == "shuttle":
                 decoded = ShuttleMessage.from_json(payload)
                 self._record_latency(decoded.ts)
-                court_xy = (
-                    self._court_point(decoded.px)
-                    if (decoded.visible and decoded.px and self.homography is not None)
-                    else None
-                )
                 self._shuttle.update(
                     status="tracked" if decoded.visible else "lost",
                     img_xy=decoded.px if decoded.visible else None,
-                    court_xy_m=court_xy,
                 )
             elif kind == "hit":
                 decoded = HitMessage.from_json(payload)
@@ -225,9 +225,12 @@ class FusionState:
         with self._lock:
             self.homography = save_homography(self.calibration_path, corners_px)
 
-    def set_players(self, players: list[dict[str, Any]]) -> None:
-        if len(players) not in (2, 4):
-            raise ValueError("Players must contain exactly two or four players")
+    def set_players(self, players: list[dict[str, Any]], mode: str = "singles") -> None:
+        if mode not in ("singles", "doubles"):
+            raise ValueError("mode must be singles or doubles")
+        expected = 2 if mode == "singles" else 4
+        if len(players) != expected:
+            raise ValueError(f"{mode.title()} requires exactly {expected} players")
         player_ids = [int(player["id"]) for player in players]
         if set(player_ids) != set(range(len(players))):
             raise ValueError("Player IDs must be consecutive starting at zero")
@@ -239,27 +242,38 @@ class FusionState:
             side_counts[side] += 1
         if any(count not in (1, 2) for count in side_counts):
             raise ValueError("Each side must have one or two players")
+        team_counts = [0, 0]
+        for player in players:
+            team = player.get("team", player.get("side"))
+            if team not in (0, 1):
+                raise ValueError("Every player team must be 0 or 1")
+            team_counts[team] += 1
+        if team_counts != [expected // 2] * 2:
+            raise ValueError("Each team must have the same number of players")
         with self._lock:
-            new_mode = "singles" if len(players) == 2 else "doubles"
+            new_mode = mode
             if new_mode != self._mode:
                 self._players.clear()
                 self._player_history.clear()
                 self._track_to_id.clear()
             self._mode = new_mode
-            self._player_config = {int(player["id"]): dict(player) for player in players}
+            # Legacy bodies without `team` keep the old meaning: team = starting side.
+            self._player_config = {
+                int(player["id"]): {"team": player["side"], **player} for player in players
+            }
             for player_id, value in self._players.items():
                 metadata = self._player_config.get(player_id, {})
                 value.update(
                     name=metadata.get("name"),
                     color=metadata.get("color"),
-                    side=metadata.get("side", player_id % 2),
+                    team=metadata.get("team", player_id % 2),
                 )
 
-    def add_score(self, side: int, delta: int) -> None:
-        if side not in (0, 1):
-            raise ValueError("side must be 0 or 1")
+    def add_score(self, team: int, delta: int) -> None:
+        if team not in (0, 1):
+            raise ValueError("team must be 0 or 1")
         with self._lock:
-            self._score[side] = (self._score[side] or 0) + delta
+            self._score[team] = (self._score[team] or 0) + delta
 
     def suggest_point(self, event_ts: int, suggested_side: int | None) -> None:
         if suggested_side not in (None, 0, 1):
@@ -307,20 +321,17 @@ class FusionState:
                 self._players.get(second),
                 self._players.get(first),
             )
-            if self._players[first] is None:
-                self._players.pop(first)
-            else:
-                self._players[first]["id"] = first
-            if self._players[second] is None:
-                self._players.pop(second)
-            else:
-                self._players[second]["id"] = second
-            first_meta = self._player_config.get(first)
-            second_meta = self._player_config.get(second)
-            if first_meta is not None or second_meta is not None:
-                self._player_config[first], self._player_config[second] = (
-                    second_meta or {},
-                    first_meta or {},
+            # Live data follows the track; name, colour and team stay with the id.
+            for player_id in (first, second):
+                if self._players[player_id] is None:
+                    self._players.pop(player_id)
+                    continue
+                metadata = self._player_config.get(player_id, {})
+                self._players[player_id].update(
+                    id=player_id,
+                    name=metadata.get("name"),
+                    color=metadata.get("color"),
+                    team=metadata.get("team", player_id % 2),
                 )
 
     def snapshot(self, *, drain_events: bool = True) -> dict[str, Any]:
@@ -375,6 +386,7 @@ class FusionState:
             "id": player_id,
             "name": metadata.get("name"),
             "color": metadata.get("color"),
+            "team": metadata.get("team", player_id % 2),
             "side": metadata.get("side", player_id % 2),
             "tracked": False,
             "img_xy": None,
@@ -387,6 +399,13 @@ class FusionState:
     @property
     def _player_count(self) -> int:
         return 2 if self._mode == "singles" else 4
+
+    def _slot_side(self, slot: int) -> int:
+        # Last side seen from the net line, else the operator's starting side.
+        player = self._players.get(slot)
+        if player is not None:
+            return player["side"]
+        return self._player_config.get(slot, {}).get("side", slot % 2)
 
     def _slot_distance(self, slot: int, court_xy: list[float] | None) -> tuple[float, int]:
         # A new track id takes the free slot whose last known court position is nearest.
