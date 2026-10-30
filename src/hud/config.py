@@ -40,6 +40,7 @@ class AppConfig:
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
     models: dict[str, dict[str, Any]] = field(default_factory=dict)
     workers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    fusion: dict[str, Any] = field(default_factory=dict)
     server: dict[str, Any] = field(default_factory=dict)
     recording: dict[str, Any] = field(default_factory=dict)
 
@@ -86,6 +87,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         supervisor=SupervisorConfig(**values.get("supervisor", {})),
         models=values.get("models", {}),
         workers=values.get("workers", {}),
+        fusion=values.get("fusion", {}),
         server=values.get("server", {}),
         recording=values.get("recording", {}),
     )

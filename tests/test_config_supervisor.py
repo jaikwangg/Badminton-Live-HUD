@@ -31,6 +31,20 @@ def test_default_config_resolves_from_cwd_and_env(
     assert load_config().bus.slots == 6
 
 
+def test_fusion_section_is_plain_dict_with_empty_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HUD_DEFAULT_CONFIG", raising=False)
+    fusion = load_config().fusion
+    assert fusion["identity"]["app_window_frames"] == 90
+    assert fusion["rally"]["end_gap_ms"] == 1800
+    assert fusion["shuttle"]["max_px_per_s"] is None
+    bare = tmp_path / "bare.yaml"
+    bare.write_text("bus:\n  slots: 4\n", encoding="utf-8")
+    monkeypatch.setenv("HUD_DEFAULT_CONFIG", str(bare))
+    assert load_config().fusion == {}
+
+
 HEARTBEAT_COMMAND = [
     sys.executable,
     "-u",
