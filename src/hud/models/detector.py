@@ -12,6 +12,8 @@ class Det:
     bbox: list[float]
     conf: float
     track_id: int | None = None
+    # COCO-17 [x, y, conf] rows from a pose model; None for a detect-only model.
+    keypoints: list[list[float]] | None = None
 
 
 class Detector(Protocol):
@@ -33,7 +35,9 @@ class YoloByteTrackDetector:
             from ultralytics import YOLO
         except ImportError as exc:
             raise RuntimeError("Install the Ultralytics runtime to load the players model") from exc
-        self._model = YOLO(str(model_path), task="detect")
+        # Task (pose or detect) comes from the exported model's metadata, so the
+        # model is chosen by models.players.path alone.
+        self._model = YOLO(str(model_path))
         self.input_size = input_size
         self.confidence = confidence
 
@@ -55,13 +59,16 @@ class YoloByteTrackDetector:
         coords = boxes.xyxy.cpu().tolist()
         confs = boxes.conf.cpu().tolist()
         ids = boxes.id.int().cpu().tolist() if boxes.id is not None else [None] * len(coords)
+        keypoints = getattr(results[0], "keypoints", None)
+        kpts = keypoints.data.cpu().tolist() if keypoints is not None else [None] * len(coords)
         return [
             Det(
                 [float(value) for value in bbox],
                 float(conf),
                 int(track_id) if track_id is not None else None,
+                kpt,
             )
-            for bbox, conf, track_id in zip(coords, confs, ids, strict=True)
+            for bbox, conf, track_id, kpt in zip(coords, confs, ids, kpts, strict=True)
         ]
 
 

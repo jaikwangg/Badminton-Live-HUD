@@ -11,7 +11,10 @@ import numpy as np
 from hud.bus.messages import HeartbeatMessage, PlayersMessage
 from hud.bus.shm_ring import SharedFrameRing
 from hud.config import AppConfig, load_config
-from hud.models.detector import Detector, create_detector
+from hud.models.detector import Det, Detector, create_detector
+from hud.models.detector_app import chest_appearance
+
+LEFT_ANKLE, RIGHT_ANKLE = 15, 16  # COCO-17 keypoint indices
 
 
 class Publisher(Protocol):
@@ -44,10 +47,17 @@ class PlayersWorker:
         publisher: Publisher,
         *,
         roi: list[float] | None = None,
+        ankle_confidence: float | None = None,
+        app: dict[str, Any] | None = None,
     ) -> None:
         self.detector = detector
         self.publisher = publisher
         self.roi = roi
+        # None: always use the bbox bottom-centre (detect-only model).
+        self.ankle_confidence = ankle_confidence
+        if app is not None and app.get("method") != "chest_color":
+            raise ValueError(f"Unsupported players app method: {app.get('method')}")
+        self.app = app
         self._last_heartbeat = 0.0
         self._processed = 0
         self._started = time.monotonic()
@@ -73,15 +83,28 @@ class PlayersWorker:
         left, top, right, bottom = self.roi
         return left * width <= x <= right * width and top * height <= y <= bottom * height
 
+    def _foot(self, detection: Det) -> tuple[float, float]:
+        x1, _, x2, y2 = detection.bbox
+        if self.ankle_confidence is not None and detection.keypoints is not None:
+            ankles = [
+                row
+                for row in detection.keypoints[LEFT_ANKLE : RIGHT_ANKLE + 1]
+                if len(row) > 2 and row[2] >= self.ankle_confidence
+            ]
+            if ankles:
+                return (
+                    sum(row[0] for row in ankles) / len(ankles),
+                    sum(row[1] for row in ankles) / len(ankles),
+                )
+        return (x1 + x2) / 2.0, y2
+
     def process(self, frame_id: int, ts: int, width: int, height: int, image: bytes) -> None:
         started_ns = time.perf_counter_ns()
         image_array = np.frombuffer(image, dtype=np.uint8).reshape(height, width, 3)
         detections = self.detector.infer(image_array)
         players: list[dict[str, Any]] = []
         for detection in detections:
-            x1, y1, x2, y2 = detection.bbox
-            foot_x = (x1 + x2) / 2.0
-            foot_y = y2
+            foot_x, foot_y = self._foot(detection)
             if not self._inside_roi(foot_x, foot_y, width, height):
                 continue
             if detection.track_id is None:
@@ -92,6 +115,9 @@ class PlayersWorker:
                     "bbox": detection.bbox,
                     "foot_px": [foot_x, foot_y],
                     "conf": detection.conf,
+                    "app": chest_appearance(image_array, detection.bbox, self.app)
+                    if self.app is not None
+                    else None,
                 }
             )
         self.publisher.send(PlayersMessage(frame_id=frame_id, ts=ts, players=players).to_json())
@@ -114,7 +140,15 @@ def run(config: AppConfig) -> None:
         config.bus.slots,
         create=False,
     )
-    worker = PlayersWorker(detector, publisher, roi=model_config.get("roi"))
+    worker = PlayersWorker(
+        detector,
+        publisher,
+        roi=model_config.get("roi"),
+        # ponytail: reuses the detection threshold for ankles; add a separate
+        # models.players key (T01 owns config) if they need different values.
+        ankle_confidence=float(model_config["confidence"]),
+        app=model_config.get("app"),
+    )
     try:
         idle_wait = Event()
         last_frame_id = 0
