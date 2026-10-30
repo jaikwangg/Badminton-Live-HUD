@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -9,7 +11,7 @@ import yaml
 
 from hud.bus.messages import PlayersMessage
 from hud.config import load_config
-from hud.models.detector import Det
+from hud.models.detector import Det, YoloByteTrackDetector, create_detector
 from hud.models.detector_app import chest_appearance
 from hud.workers import players as players_worker
 from hud.workers.players import PlayersWorker
@@ -201,3 +203,83 @@ def test_run_binds_the_configured_bus_endpoint(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(RuntimeError, match="stop"):
         players_worker.run(config)
     assert bound == ["tcp://127.0.0.1:59999"]
+
+
+class _Tensor(list):
+    def cpu(self) -> _Tensor:
+        return self
+
+    def tolist(self) -> list:
+        return list(self)
+
+
+class _Result:
+    def __init__(self, rows: list[list[float]]) -> None:
+        # rows: [x1, y1, x2, y2, conf] in crop pixels; one keypoint at the box bottom-left.
+        self.boxes = SimpleNamespace(
+            xyxy=_Tensor(row[:4] for row in rows), conf=_Tensor(row[4] for row in rows)
+        )
+        self.keypoints = SimpleNamespace(data=_Tensor([[row[0], row[3], 0.9]] for row in rows))
+
+
+class _FakeYolo:
+    """Stand-in for ultralytics.YOLO that answers each crop by its (height, width)."""
+
+    def __init__(self, path: str) -> None:
+        self.calls: list[tuple[str, list[tuple[int, int]]]] = []
+        self.answers: dict[tuple[int, int], list[list[float]]] = {}
+
+    def predict(self, images: list[np.ndarray], **kwargs: object) -> list[_Result]:
+        self.calls.append(("predict", [img.shape[:2] for img in images]))
+        return [_Result(self.answers.get(img.shape[:2], [])) for img in images]
+
+    def track(self, source: np.ndarray, **kwargs: object) -> list:
+        self.calls.append(("track", [source.shape[:2]]))
+        return []
+
+
+def _tiled_detector(monkeypatch: pytest.MonkeyPatch, tiles: list | None) -> YoloByteTrackDetector:
+    monkeypatch.setitem(sys.modules, "ultralytics", SimpleNamespace(YOLO=_FakeYolo))
+    settings = {"path": "m.engine", "backend": "tensorrt", "input_size": 640, "confidence": 0.35}
+    detector = create_detector({**settings, "tiles": tiles})
+    # Real ByteTrack needs ultralytics; number the merged detections instead.
+    monkeypatch.setattr(
+        detector,
+        "_track",
+        lambda img, dets: [Det(d.bbox, d.conf, i, d.keypoints) for i, d in enumerate(dets)],
+    )
+    return detector
+
+
+def test_null_tiles_keep_the_single_full_frame_track_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    for tiles in (None, []):
+        detector = _tiled_detector(monkeypatch, tiles)
+        assert detector.infer(np.zeros((100, 200, 3), dtype=np.uint8)) == []
+        assert detector._model.calls == [("track", [(100, 200)])]
+
+
+def test_tiles_run_in_one_batch_map_back_and_merge(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Full frame at the model conf (0.35) + two overlapping far-half tiles at conf 0.2.
+    tiles = [[0, 0, 1, 1], [0, 0.5, 0.6, 1, 0.2], [0.35, 0.5, 1, 1, 0.2]]
+    detector = _tiled_detector(monkeypatch, tiles)
+    detector._model.answers = {
+        # Full frame: near player, and the far player below the full-frame conf.
+        (100, 200): [[10, 60, 30, 95, 0.8], [90, 55, 100, 75, 0.3]],
+        # Left tile (x0 0, y0 50): near player again, the far player at 0.25, and a
+        # person cut by the tile's inner right edge (dropped; the full frame sees them).
+        (50, 120): [[10, 10, 30, 45, 0.6], [90, 5, 100, 25, 0.25], [105, 0, 120, 40, 0.9]],
+        # Right tile (x0 70, y0 50): the far player again, shifted a pixel.
+        (50, 130): [[21, 5, 31, 25, 0.22]],
+    }
+    players = detector.infer(np.zeros((100, 200, 3), dtype=np.uint8))
+    assert detector._model.calls == [("predict", [(100, 200), (50, 120), (50, 130)])]
+    assert [(p.bbox, p.conf) for p in players] == [
+        ([10, 60, 30, 95], 0.8),
+        ([90, 55, 100, 75], 0.25),
+    ]
+    assert players[1].keypoints == [[90, 75, 0.9]]
+
+
+def test_bad_tile_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="tile"):
+        _tiled_detector(monkeypatch, [[0.5, 0, 0.2, 1]])
