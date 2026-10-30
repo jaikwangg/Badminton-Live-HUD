@@ -129,15 +129,19 @@ class FusionState:
             direction_max_gap_ms=float(shuttle.get("direction_max_gap_ms", 500.0)),
             rest_radius_px=float(shuttle.get("rest_radius_px", 8.0)),
             rest_ms=float(shuttle.get("rest_ms", 400.0)),
+            turn_points=int(shuttle.get("turn_points", 3)),
         )
         self._fsm = RallyFSM(
             homography=self.homography,
             end_gap_ms=float(rally.get("end_gap_ms", 1800.0)),
             rest_landing_ms=float(rally.get("rest_landing_ms", 3000.0)),
+            serve_still_ms=float(rally.get("serve_still_ms", 2000.0)),
+            alternation=str(rally.get("alternation", "audio")),
         )
         self._shots = ShotDetector(
             match_window_ms=float(rally.get("shot_match_window_ms", 100.0)),
-            refractory_ms=float(rally.get("shot_refractory_ms", 200.0)),
+            refractory_ms=float(rally.get("shot_refractory_ms", 300.0)),
+            reach_ratio=float(rally.get("reach_ratio", 0.5)),
         )
         self._workers = {
             name: {"status": "down", "last_seen": 0.0, "fps": None} for name in _WORKERS
@@ -326,10 +330,11 @@ class FusionState:
                     audio_ok = (
                         audio["status"] == "ok" and now - audio["last_seen"] <= _HEARTBEAT_TIMEOUT_S
                     )
+                    # Attribute the shot to the confirmed turn vertex, not the confirming frame.
                     self._on_shot(
                         self._shots.register_direction_change(
-                            decoded.ts,
-                            px=res.px,
+                            res.turn_ts if res.turn_ts is not None else decoded.ts,
+                            px=res.turn_px if res.turn_px is not None else res.px,
                             players=[p for p in self._players.values() if p["tracked"]],
                             audio_degraded=not audio_ok,
                         )
