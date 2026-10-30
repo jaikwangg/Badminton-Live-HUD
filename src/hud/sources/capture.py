@@ -59,6 +59,32 @@ class CaptureProcess:
         last_frame_at = started_at
         last_heartbeat_at = started_at
         backoff = 0.25
+
+        def heartbeat(ts: int | None = None) -> None:
+            nonlocal last_heartbeat_at
+            now = time.monotonic()
+            if now - last_heartbeat_at < 1.0:
+                return
+            print(
+                HeartbeatMessage(
+                    worker="capture",
+                    ts=ts if ts is not None else time.monotonic_ns(),
+                    fps=frame_count / max(now - started_at, 1e-9),
+                    proc_ms=None,
+                ).to_json(),
+                flush=True,
+            )
+            last_heartbeat_at = now
+
+        def wait_backoff() -> None:
+            # Backoff can exceed the supervisor's 3 s heartbeat timeout, so keep beating.
+            nonlocal backoff
+            deadline = time.monotonic() + backoff
+            while not self._stop and (remaining := deadline - time.monotonic()) > 0:
+                time.sleep(min(remaining, 0.5))
+                heartbeat()
+            backoff = min(backoff * 2, self.max_backoff_s)
+
         try:
             while not self._stop:
                 if source is None:
@@ -68,8 +94,7 @@ class CaptureProcess:
                         last_frame_at = time.monotonic()
                     except Exception:
                         source = None
-                        time.sleep(backoff)
-                        backoff = min(backoff * 2, self.max_backoff_s)
+                        wait_backoff()
                         continue
                 try:
                     frame = source.read()
@@ -80,6 +105,11 @@ class CaptureProcess:
                     image = np.frombuffer(frame.image, dtype=np.uint8).reshape(
                         frame.height, frame.width, 3
                     )
+                    if image.shape[:2] != (bus.height, bus.width):
+                        # Sources may change resolution (camera reconnect, other file).
+                        import cv2
+
+                        image = cv2.resize(image, (bus.width, bus.height))
                     bus.write(image, frame.ts)
                     frame_count += 1
                     last_frame_at = now
@@ -87,20 +117,8 @@ class CaptureProcess:
                 elif now - last_frame_at > self.reconnect_after_s:
                     source.close()
                     source = None
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, self.max_backoff_s)
-                if now - last_heartbeat_at >= 1.0:
-                    elapsed = max(now - started_at, 1e-9)
-                    print(
-                        HeartbeatMessage(
-                            worker="capture",
-                            ts=frame.ts if frame is not None else time.monotonic_ns(),
-                            fps=frame_count / elapsed,
-                            proc_ms=None,
-                        ).to_json(),
-                        flush=True,
-                    )
-                    last_heartbeat_at = now
+                    wait_backoff()
+                heartbeat(frame.ts if frame is not None else None)
         finally:
             if source is not None:
                 source.close()
