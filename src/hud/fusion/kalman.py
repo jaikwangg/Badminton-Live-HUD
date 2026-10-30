@@ -43,7 +43,13 @@ class ShuttleKalmanFilter:
         direction_change_deg: float = 55.0,
         max_px_per_s: float | None = None,
         max_jump_frames: int = 3,
+        direction_max_gap_ms: float = 500.0,
     ) -> None:
+        # Direction memory survives a loss up to this gap (a hit hidden by the hitter's body,
+        # or one missed message at ~4 Hz). Shot-to-shot is rarely under 0.5 s, so such a gap
+        # hides at most one hit and the chord across it still shows the reversal.
+        # Proposed config key: `fusion.shuttle.direction_max_gap_ms`; re-check on GPU-rate clips.
+        self.direction_max_gap_ns = int(direction_max_gap_ms * 1_000_000)
         # max_px_per_s comes from config `shuttle.max_px_per_s`; None disables the jump gate.
         self.max_px_per_s = max_px_per_s
         self.max_jump_frames = max_jump_frames
@@ -180,20 +186,34 @@ class ShuttleKalmanFilter:
             z = np.array([zx, zy], dtype=np.float64)
 
             if not self._initialized or self.status == "lost":
-                self._x = np.array([zx, zy, 0.0, 0.0], dtype=np.float64)
+                # At low message rates one miss already means lost; keep the direction
+                # history across a short gap instead of needing 3 fresh detections.
+                bridged = (
+                    self._last_observation is not None
+                    and self.last_seen_ts is not None
+                    and 0 < ts - self.last_seen_ts <= self.direction_max_gap_ns
+                )
+                velocity = (0.0, 0.0)
+                dir_changed = False
+                if bridged:
+                    gap_s = (ts - self.last_seen_ts) / 1e9
+                    last_x, last_y = self._last_observation
+                    velocity = ((zx - last_x) / gap_s, (zy - last_y) / gap_s)
+                    dir_changed = self._detect_direction_change(velocity)
+                self._x = np.array([zx, zy, *velocity], dtype=np.float64)
                 self._p = np.diag([10.0, 10.0, 1_000_000.0, 1_000_000.0]).astype(np.float64)
                 self._initialized = True
                 self.status = "tracked"
-                self._prev_velocity = (0.0, 0.0)
+                self._prev_velocity = velocity
                 self._last_observation = (zx, zy)
                 self.last_seen_ts = ts
                 self._jump_frames = 0
                 return ShuttleTrackResult(
                     status="tracked",
                     px=[zx, zy],
-                    velocity=(0.0, 0.0),
-                    speed_px_s=0.0,
-                    direction_changed=False,
+                    velocity=velocity,
+                    speed_px_s=math.hypot(*velocity),
+                    direction_changed=dir_changed,
                 )
 
             self._predict(dt)

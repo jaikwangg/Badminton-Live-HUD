@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import pytest
 
@@ -401,20 +402,34 @@ def test_rally_end_drops_landing_far_outside_court() -> None:
     assert fsm.landing_xy_m_est is None
 
 
-def test_rally_without_shot_or_duration_ends_silently() -> None:
+def test_false_start_rally_is_closed_without_point_suggestion() -> None:
     ms = 1_000_000
     fsm = RallyFSM()
     fsm.start_serve(1_000 * ms)
     fsm.drain_events()
     fsm.end_rally(2_000 * ms)  # no shot
     assert fsm.state == RallyState.END
-    assert fsm.drain_events() == []
+    assert [e["kind"] for e in fsm.drain_events()] == ["rally_end"]
 
-    # A shot but the shuttle never seen after it: t_ms would be 0.
+    # A shot but the shuttle never seen after it: t_ms is 0, still paired with rally_end.
     fsm.on_shot(ShotInfo(ts=3_000 * ms, by=0, speed_kmh_est=None))
-    fsm.drain_events()
     fsm.on_shuttle_update("lost", None, 5_000 * ms)
     assert fsm.state == RallyState.END
+    events = fsm.drain_events()
+    assert [e["kind"] for e in events] == ["rally_start", "shot", "rally_end"]
+    assert events[-1]["data"] == {"n": 2, "t_ms": 0, "shots": 1}
+
+
+def test_operator_reset_mid_rally_closes_it_with_rally_end() -> None:
+    ms = 1_000_000
+    fsm = RallyFSM()
+    fsm.on_shot(ShotInfo(ts=1_000 * ms, by=0, speed_kmh_est=None))
+    fsm.on_shuttle_update("tracked", [1.0, 1.0], 1_700 * ms)
+    fsm.reset_to_idle()
+    events = fsm.drain_events()
+    assert [e["kind"] for e in events] == ["rally_start", "shot", "rally_end"]
+    assert events[-1]["ts"] == 1_700 * ms
+    fsm.reset_to_idle()  # already idle: nothing more
     assert fsm.drain_events() == []
 
 
@@ -511,3 +526,111 @@ def test_doubles_point_suggestions_use_full_court_width_and_hitter_side() -> Non
 def test_rally_fsm_rejects_unknown_mode() -> None:
     with pytest.raises(ValueError, match="mode must"):
         RallyFSM(mode="mixed")
+
+
+# ============================================================================
+# 4. Replay: recorded worker messages through kalman + detector + fsm
+# ============================================================================
+
+Message = tuple[str, int, Any]  # (kind, ts_ms, payload)
+
+
+def replay(
+    messages: list[Message], *, audio_ok: bool = False, kf: ShuttleKalmanFilter | None = None
+) -> list[dict[str, Any]]:
+    """Feed shuttle/hit/players messages the way fusion does and return the emitted events.
+
+    Payloads: shuttle -> image [x, y] or None (not visible), hit -> strength,
+    players -> list of tracked player dicts (id, side, team, bbox, court_xy_m).
+    """
+    kf = kf or ShuttleKalmanFilter()
+    detector = ShotDetector()
+    fsm = RallyFSM()
+    players: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    for kind, ts_ms, payload in messages:
+        ts = ts_ms * 1_000_000
+        if kind == "players":
+            players = payload
+        elif kind == "hit":
+            shot = detector.register_audio_hit(ts, payload)
+            if shot is not None:
+                fsm.on_shot(shot)
+        else:
+            res = kf.update(payload is not None, payload, ts)
+            fsm.on_shuttle_update(res.status, kf.last_seen_px, ts)
+            if res.direction_changed:
+                shot = detector.register_direction_change(
+                    ts, px=res.px, players=players, audio_degraded=not audio_ok
+                )
+                if shot is not None:
+                    fsm.on_shot(shot)
+        events.extend(fsm.drain_events())
+    return events
+
+
+_REPLAY_PLAYERS = [
+    {"id": 0, "side": 0, "team": 0, "bbox": [350.0, 550.0, 450.0, 700.0], "court_xy_m": [2.0, 3.0]},
+    {
+        "id": 1,
+        "side": 1,
+        "team": 1,
+        "bbox": [350.0, 200.0, 450.0, 300.0],
+        "court_xy_m": [11.0, 3.0],
+    },
+]
+# Synthetic ~4 Hz shuttle stream (CPU-rate inference): near player (bottom of image) serves
+# up, far player returns at 1250 ms, the near player's return at ~2000 ms is hidden by one
+# missed message, then the shuttle leaves view. A lone false reversal follows at 10.5 s.
+_REPLAY_SHUTTLE = [
+    (0, [400.0, 560.0]),
+    (250, [400.0, 480.0]),
+    (500, [400.0, 400.0]),
+    (750, [400.0, 320.0]),
+    (1000, [400.0, 260.0]),
+    (1250, [400.0, 340.0]),
+    (1500, [400.0, 420.0]),
+    (1750, [400.0, 500.0]),
+    (2000, None),
+    (2250, [400.0, 470.0]),
+    (2500, [400.0, 390.0]),
+    (2750, [400.0, 310.0]),
+    (3000, [400.0, 250.0]),
+    *((ms, None) for ms in range(3250, 10000, 250)),
+    (10000, [400.0, 560.0]),
+    (10250, [400.0, 480.0]),
+    (10500, [400.0, 560.0]),
+    *((ms, None) for ms in range(10750, 13000, 250)),
+]
+_REPLAY_HITS = [(1260, 0.8), (2200, 0.7), (10490, 0.5)]
+
+
+def _replay_fixture(*, with_hits: bool) -> list[Message]:
+    messages: list[Message] = [("players", 0, _REPLAY_PLAYERS)]
+    messages += [("shuttle", ms, px) for ms, px in _REPLAY_SHUTTLE]
+    if with_hits:
+        messages += [("hit", ms, strength) for ms, strength in _REPLAY_HITS]
+    return sorted(messages, key=lambda m: m[1])
+
+
+@pytest.mark.parametrize("audio_ok", [False, True])
+def test_replay_low_rate_stream_counts_shots_and_pairs_rally_events(audio_ok: bool) -> None:
+    events = replay(_replay_fixture(with_hits=audio_ok), audio_ok=audio_ok)
+    assert [e["kind"] for e in events] == [
+        "rally_start", "shot", "shot", "rally_end", "point_suggested",
+        "rally_start", "shot", "rally_end",
+    ]  # fmt: skip
+    shots = [e for e in events if e["kind"] == "shot"]
+    assert [s["data"]["by"] for s in shots] == [1, 0, 0]
+    # The hit hidden by the missed message is reported on reappearance.
+    assert [s["ts"] // 1_000_000 for s in shots[:2]] == [1250, 2200 if audio_ok else 2250]
+    assert events[3]["data"] == {"n": 1, "t_ms": 1750, "shots": 2}
+    assert events[-1]["data"] == {"n": 2, "t_ms": 0, "shots": 1}
+
+
+def test_replay_without_direction_memory_misses_the_hidden_hit() -> None:
+    events = replay(
+        _replay_fixture(with_hits=False), kf=ShuttleKalmanFilter(direction_max_gap_ms=0.0)
+    )
+    first_rally_end = next(e for e in events if e["kind"] == "rally_end")
+    assert first_rally_end["data"]["shots"] == 1

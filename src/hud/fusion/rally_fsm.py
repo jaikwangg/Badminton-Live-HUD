@@ -178,28 +178,29 @@ class RallyFSM:
         # Duration runs to the last sighting, not to the moment the loss was confirmed.
         last_ts = max(self.start_ts, min(ts, self.last_seen_ts))
         self.current_t_ms = (last_ts - self.start_ts) // 1_000_000
-        # A rally with no shot or no time after it is a false start: end it silently.
+        self._emit_rally_end(ts)
+        # A rally with no shot or no time after it is a false start: no point to suggest.
         if self.shots_count == 0 or self.current_t_ms == 0:
             return
-
-        self._pending_events.append(
-            {
-                "ts": ts,
-                "kind": "rally_end",
-                "data": {
-                    "n": self.rally_n,
-                    "t_ms": self.current_t_ms,
-                    "shots": self.shots_count,
-                },
-            }
-        )
 
         suggestion = self._evaluate_point_suggestion(self._landing_court_xy(), self.last_shot)
         self.landing_xy_m_est = suggestion["landing_xy_m_est"]
         self._pending_events.append({"ts": ts, "kind": "point_suggested", "data": suggestion})
 
+    def _emit_rally_end(self, ts: int) -> None:
+        # Every emitted rally_start gets exactly one rally_end, false starts included.
+        self._pending_events.append(
+            {
+                "ts": ts,
+                "kind": "rally_end",
+                "data": {"n": self.rally_n, "t_ms": self.current_t_ms, "shots": self.shots_count},
+            }
+        )
+
     def reset_to_idle(self) -> None:
-        """Transition END -> IDLE."""
+        """Transition any state -> IDLE; an active rally is closed with rally_end first."""
+        if self.is_active:
+            self._emit_rally_end(self.start_ts + self.current_t_ms * 1_000_000)
         self.state = RallyState.IDLE
         self.current_t_ms = 0
         self.shots_count = 0
