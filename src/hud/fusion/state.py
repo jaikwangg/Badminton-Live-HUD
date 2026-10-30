@@ -340,13 +340,13 @@ class FusionState:
             validate_game_state(result)
             return result
 
-    @staticmethod
-    def _empty_player(player_id: int) -> dict[str, Any]:
+    def _empty_player(self, player_id: int) -> dict[str, Any]:
+        metadata = self._player_config.get(player_id, {})
         return {
             "id": player_id,
-            "name": None,
-            "color": None,
-            "side": player_id % 2,
+            "name": metadata.get("name"),
+            "color": metadata.get("color"),
+            "side": metadata.get("side", player_id % 2),
             "tracked": False,
             "img_xy": None,
             "bbox": None,

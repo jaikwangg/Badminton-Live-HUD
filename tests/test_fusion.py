@@ -100,6 +100,33 @@ def test_doubles_game_state_contains_four_players_and_two_per_side(tmp_path) -> 
     assert [player["side"] for player in snapshot["players"]] == [0, 0, 1, 1]
 
 
+def test_doubles_court_points_use_full_doubles_width(tmp_path) -> None:
+    state = FusionState(tmp_path / "court_calib.json")
+    state.calibrate([[0, 0], [100, 0], [100, 100], [0, 100]])
+    state.set_players(
+        [
+            {"id": 0, "name": "A", "color": None, "side": 0},
+            {"id": 1, "name": "B", "color": None, "side": 0},
+            {"id": 2, "name": "C", "color": None, "side": 1},
+            {"id": 3, "name": "D", "color": None, "side": 1},
+        ]
+    )
+    state.ingest(
+        PlayersMessage(
+            frame_id=1,
+            ts=1_000_000,
+            players=[
+                {"track_id": 10, "bbox": [0, 0, 10, 1], "foot_px": [5, 1], "conf": 0.9},
+                {"track_id": 11, "bbox": [0, 0, 10, 99], "foot_px": [5, 99], "conf": 0.9},
+            ],
+        ).to_json()
+    )
+
+    snapshot = state.snapshot()
+    assert snapshot["players"][0]["court_xy_m"][1] == pytest.approx(0.061)
+    assert snapshot["players"][1]["court_xy_m"][1] == pytest.approx(6.039)
+
+
 def test_players_require_two_or_four_with_one_or_two_per_side() -> None:
     state = FusionState()
     with pytest.raises(ValueError, match="two or four"):
@@ -176,6 +203,7 @@ def test_operator_api_and_websocket_serve_contract_state(tmp_path) -> None:
         == 200
     )
     assert api_client.post("/api/players", json={"players": []}).status_code == 422
+    assert api_client.post("/api/players", json={"players": [{}, {}, {}]}).status_code == 422
     assert api_client.post("/api/score", json={"side": 1, "delta": 1}).status_code == 200
     assert api_client.post("/api/swap_ids", json={"a": 0, "b": 1}).status_code == 200
     assert api_client.post("/api/calibrate", json={"corners_px": []}).status_code == 422
