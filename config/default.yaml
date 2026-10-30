@@ -14,6 +14,12 @@ models:
     # Court ROI [x1, y1, x2, y2] as image fractions; only people whose feet are inside are
     # forwarded. null = whole frame.
     roi: null
+    # Inference tiles [x1, y1, x2, y2(, conf)] as image fractions, batched and merged into one
+    # tracker so far players get more pixels. null = one full-frame pass. Roughly doubles
+    # players time. a540 portrait example:
+    # [[0, 0, 1, 1], [0, 0.396, 0.556, 0.6875, 0.2], [0.444, 0.396, 1, 0.6875, 0.2]]
+    tiles: null
+    tile_merge_iou: 0.5  # boxes from different tiles overlapping this much are one person
     app:  # players[].app appearance vector (CONTRACTS.md)
       method: chest_color  # chest_color now; a re-ID model later
       length: 16  # fixed vector length: (length - 2) hue bins + dark and light fractions
@@ -36,6 +42,11 @@ models:
     # Seconds the background median samples are spread over, so players who move drop out.
     # Not tuned on real 60 fps clips.
     background_sample_span_s: 10.0
+    # Span of the first background, so detection starts within ~2 s. Not tuned on real 60 fps clips.
+    background_warmup_span_s: 2.0
+    # Frame crop [x1, y1, x2, y2] as image fractions applied before the model resize.
+    # null = whole frame. a540 example: [0.0, 0.0417, 1.0, 0.625]
+    crop: null
 bus:
   name: hud_frames
   slots: 4
@@ -69,6 +80,11 @@ workers:
     refractory_ms: 150.0  # ignore further onsets this long after a hit
     sensitivity: 3.5  # onset threshold as a multiple of the adaptive noise floor
     queue_chunks: 8  # audio chunks buffered between callback and main thread
+    # File source: audio is anchored to the capture frame ring. Not tuned on real 60 fps clips.
+    ring_poll_s: 0.5  # how often the ring is read for a new anchor estimate
+    ring_jump_ms: 50.0  # an estimate this far off the window minimum restarts the window
+    ring_window: 8  # anchor estimates kept; the minimum is the least-delayed one
+    max_lag_ms: 500.0  # chunks already this late are skipped to catch up
   server:  # fusion + WebSocket + operator HTTP
     enabled: true
     heartbeat: false
@@ -95,10 +111,18 @@ fusion:
     app_window_frames: 90   # ~±45 frames per LESSONS §4; past frames only
     app_weight_m: 2.0       # metres of cost per unit L1 appearance distance; not tuned
     side_mismatch_cost: 100 # larger than any court distance + appearance term
+    net_slack_m: 1.0        # feet this close past the net may still be the other team; not tuned on real 60 fps clips
+    gallery_s: 5.0          # per-slot appearance gallery = median of the first N s tracked; not tuned on real 60 fps clips
+    gallery_refresh: 0.002  # per-frame EMA rate of the gallery after that; not tuned on real 60 fps clips
   rally:
     end_gap_ms: 1800        # LESSONS §6
     shot_match_window_ms: 100
-    shot_refractory_ms: 200
+    shot_refractory_ms: 300
+    reach_ratio: 0.5        # a turn counts as a hit only within reach_ratio x bbox height of a player (LESSONS §5)
+    serve_still_ms: 2000    # a rally starts only on a shot after the shuttle was unseen or at rest this long; not tuned on real 60 fps clips
+    # audio = alternate the hitter's side only after an audio-confirmed shot;
+    # always = alternate on every shot; off = never alternate.
+    alternation: audio
     rest_landing_ms: 3000   # shuttle seen at rest this soon after rally end = landing point; not tuned on real 60 fps clips
   players:
     # Player court xy: median of the last N frames; moves under deadband_m are ignored.
@@ -111,6 +135,7 @@ fusion:
     direction_max_gap_ms: 500  # direction memory survives a loss up to this gap; not tuned on real 60 fps clips
     rest_radius_px: 8.0     # detections within this radius count as the shuttle at rest; not tuned on real 60 fps clips
     rest_ms: 400.0          # at rest this long -> shuttle not in play; not tuned on real 60 fps clips
+    turn_points: 3          # accepted points before and after a reversal to confirm it; not tuned on real 60 fps clips
 server:
   ws_port: 8765
   http_port: 8080
