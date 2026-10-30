@@ -11,7 +11,8 @@
 - ลำดับ channel, ลำดับสี, วิธี normalize และวิธีคำนวณภาพพื้นหลัง ต้องตรงกับโค้ดใน repo ทางการ (`dataset.py`, `test.py`) ให้อ่านจากโค้ดจริงแล้วบันทึกไว้ใน PR ห้ามเดา
 
 ## ทำ
-- `tools/export_trt.py`: โหลดคลาส `TrackNet` จาก repo ทางการที่ clone ไว้ (ใช้ `--repo` ห้าม copy โค้ดเข้ามา) โดยอ่าน `seq_len` และ `bg_mode` จาก `param_dict` แล้วโหลด `ckpt["model"]` ด้วย `strict=True` ถ้าโหลดไม่ได้ **ต้องหยุดพร้อม error** ห้าม export โมเดลที่ weight ยังเป็นค่าสุ่ม จากนั้น export เป็น ONNX และถ้าสั่งไว้ให้ build `.engine` ด้วย `trtexec`
+- `tools/export_trt.py`: โหลดคลาส `TrackNet` จาก repo ทางการที่ clone ไว้ (ใช้ `--repo` ห้าม copy โค้ดเข้ามา) โดยอ่าน `seq_len` และ `bg_mode` จาก `param_dict` แล้วโหลด `ckpt["model"]` ด้วย `strict=True` ถ้าโหลดไม่ได้ **ต้องหยุดพร้อม error** ห้าม export โมเดลที่ weight ยังเป็นค่าสุ่ม จากนั้น export เป็น ONNX และถ้าสั่งไว้ให้ build `.engine` ด้วย `trtexec` หรือ TensorRT Python API (ไม่ต้องมี `trtexec`)
+- backend TensorRT ใช้ `cuda-bindings` (ไม่ใช้ pycuda) และ pin TensorRT ไว้ที่ 10.x (extra `trt` ใน `pyproject.toml`) เพราะ 11.x เอา `BuilderFlag.FP16` ออก
 - interface `ShuttleTracker.infer(frames, background) -> (visible, px, conf)` แยก backend เป็น ONNX และ TensorRT ขนาด input อ่านจากโมเดล ไม่ hard-code
 - worker เก็บ 8 เฟรมล่าสุดไว้ในหน่วยความจำของตัวเอง ถ้าเฟรมข้ามไม่เกิน `max_gap` ให้ใช้เฟรมล่าสุดเติมช่องที่ขาด ถ้าข้ามเกินกว่านั้นให้ reset หน้าต่าง ค่าทั้งหมดอยู่ใน config
 - เก็บภาพทุกเฟรมที่ย่อแล้วไว้ใน deque ไม่ต้องย่อใหม่ซ้ำทุกครั้ง และใช้ `cv2.resize` แบบเดียวกับ repo ทางการ ไม่ใช้การหยิบ pixel แบบ nearest
