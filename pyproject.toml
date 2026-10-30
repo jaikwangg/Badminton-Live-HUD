@@ -7,7 +7,7 @@ name = "badminton-live-hud"
 version = "0.1.0"
 description = "Real-time badminton HUD pipeline"
 requires-python = ">=3.11,<3.12"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "scipy>=1.11", "sounddevice>=0.4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
