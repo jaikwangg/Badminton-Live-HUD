@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+import time
 import types
+import wave
 from threading import Event
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from hud.bus.messages import HitMessage
 from hud.config import AppConfig
@@ -210,3 +214,99 @@ def test_capture_publishes_hits_from_main_thread_then_returns_when_stream_stops(
         audio._capture(worker, 44100, 1024, 8, Event())
     hits = [HitMessage.from_json(m) for m in publisher.messages if '"hit"' in m]
     assert len(hits) == 1
+
+
+FFMPEG = audio.find_ffmpeg(AppConfig())
+needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not available")
+
+
+def _write_click_wav(path, duration_s: float, click_times_s: list[float], rate: int = 16000):
+    """Quiet noise with 20 ms 4 kHz clicks, written with the stdlib wave module."""
+    rng = np.random.default_rng(0)
+    signal = rng.uniform(-0.003, 0.003, int(duration_s * rate))
+    click = _generate_tone(4000, 0.02, sample_rate=rate, amplitude=0.6)
+    for t in click_times_s:
+        start = int(t * rate)
+        signal[start : start + len(click)] += click
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes((np.clip(signal, -1, 1) * 32767).astype("<i2").tobytes())
+
+
+class StopAfterHits(FakePublisher):
+    def __init__(self, stop: Event, hits: int) -> None:
+        super().__init__()
+        self.stop, self.hits = stop, hits
+
+    def send(self, message: str) -> None:
+        super().send(message)
+        if sum('"hit"' in m for m in self.messages) >= self.hits:
+            self.stop.set()
+
+
+def _hit_times(messages: list[str]) -> list[int]:
+    return [HitMessage.from_json(m).ts for m in messages if '"hit"' in m]
+
+
+@needs_ffmpeg
+def test_file_audio_hits_land_on_click_times_in_real_time(tmp_path) -> None:
+    clip = tmp_path / "clicks.wav"
+    _write_click_wav(clip, 1.0, [0.3, 0.8])
+    publisher = FakePublisher()
+    worker = AudioWorker(AudioHitDetector(sample_rate=16000, sensitivity=3.0), publisher)
+    started = time.monotonic_ns()
+    audio._replay_file(worker, FFMPEG, str(clip), False, 16000, 256, Event())
+    elapsed_s = (time.monotonic_ns() - started) / 1e9
+    hits = _hit_times(publisher.messages)
+    assert len(hits) == 2
+    # Chunks are 16 ms, so a hit is stamped at most one chunk before its click.
+    assert abs((hits[1] - hits[0]) / 1e6 - 500) <= 20
+    assert 0.25 <= (hits[0] - started) / 1e9 <= 0.8  # click at 0.3 s plus ffmpeg start-up
+    assert elapsed_s >= 0.95  # paced in real time, not decoded as fast as possible
+
+
+@needs_ffmpeg
+def test_file_audio_loop_keeps_one_continuous_clock(tmp_path) -> None:
+    clip = tmp_path / "loop.wav"
+    _write_click_wav(clip, 0.5, [0.2])
+    stop = Event()
+    publisher = StopAfterHits(stop, 3)
+    worker = AudioWorker(AudioHitDetector(sample_rate=16000, sensitivity=3.0), publisher)
+    audio._replay_file(worker, FFMPEG, str(clip), True, 16000, 256, stop)
+    hits = _hit_times(publisher.messages)
+    assert len(hits) == 3
+    assert all(abs((b - a) / 1e6 - 500) <= 20 for a, b in zip(hits, hits[1:], strict=False))
+
+
+def _run_file_source(path: str) -> list[str]:
+    config = AppConfig()
+    config.source.path = path
+    config.workers["audio"] = {"sample_rate": 16000}
+    publisher = FakePublisher()
+    degraded: list[bool] = []
+    with (
+        patch.object(audio, "ZmqPublisher", return_value=publisher),
+        patch.object(audio, "has_audio_input_device", side_effect=AssertionError("mic used")),
+        patch.object(audio, "_degraded_heartbeat", lambda stop: degraded.append(True)),
+    ):
+        audio.run(config)
+    assert degraded == [True]
+    return publisher.messages
+
+
+@needs_ffmpeg
+def test_file_without_audio_track_degrades(tmp_path) -> None:
+    clip = tmp_path / "silent.mp4"
+    subprocess.run(
+        [FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.3"]
+        + ["-c:v", "mpeg4", str(clip)],
+        check=True,
+    )
+    assert _run_file_source(str(clip)) == []
+
+
+def test_file_source_without_ffmpeg_degrades() -> None:
+    with patch.object(audio, "find_ffmpeg", return_value=None):
+        assert _run_file_source("match.mp4") == []
