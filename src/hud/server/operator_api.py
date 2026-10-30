@@ -143,16 +143,25 @@ async def serve(config_path: str | None = None) -> None:
     from hud.server.ws_server import create_ws_app, ingest_worker_messages
 
     config = load_config(config_path)
-    # `fusion` is a plain dict from config; older configs without it keep the defaults.
-    state = FusionState(fusion=getattr(config, "fusion", {}) or {})
+    # load_config resolves fusion.calibration_path against the config file's directory.
+    state = FusionState(config.fusion["calibration_path"], fusion=config.fusion)
     ws_config = uvicorn.Config(create_ws_app(state), host="0.0.0.0", port=config.server["ws_port"])
     http_config = uvicorn.Config(
         create_operator_app(state, config), host="0.0.0.0", port=config.server["http_port"]
     )
     ws_server = uvicorn.Server(ws_config)
     http_server = uvicorn.Server(http_config)
-    await asyncio.gather(ws_server.serve(), http_server.serve(), ingest_worker_messages(state))
+    await asyncio.gather(
+        ws_server.serve(), http_server.serve(), ingest_worker_messages(state, config)
+    )
 
 
 if __name__ == "__main__":
-    asyncio.run(serve())
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=None)
+    if sys.platform == "win32":  # zmq.asyncio cannot poll on the default Proactor loop
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(serve(parser.parse_args().config))
