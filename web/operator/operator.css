@@ -34,6 +34,8 @@ button.danger { color: #ffdfe1; background: #512932; border-color: #82404b; }
 .hint { margin-bottom: 8px; color: #f6c85f; font-weight: 700; }
 .file-button { display: inline-flex; align-items: center; margin-bottom: 12px; }
 .file-button input { display: none; }
+.frame-source { margin-bottom: 12px; }
+.frame-source .file-button { margin-bottom: 0; }
 #calibration { display: none; width: 100%; margin-bottom: 12px; border: 1px solid #32495c; border-radius: 8px; touch-action: none; }
 
 .player-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }

@@ -1,10 +1,41 @@
 from __future__ import annotations
 
+import uuid
+
+import cv2
+import numpy as np
 from fastapi.testclient import TestClient
 from httpx import Response
 
+from hud.bus.shm_ring import SharedFrameRing
+from hud.config import AppConfig
 from hud.fusion.state import FusionState
 from hud.server.operator_api import create_operator_app
+
+
+def test_frame_jpg_serves_latest_bus_frame_at_source_size(tmp_path) -> None:
+    config = AppConfig()
+    config.bus.name = f"hud_test_{uuid.uuid4().hex[:12]}"
+    config.source.width, config.source.height = 64, 48
+    client = TestClient(create_operator_app(FusionState(tmp_path / "court_calib.json"), config))
+    assert client.get("/api/frame.jpg").status_code == 503  # no bus yet
+
+    ring = SharedFrameRing(config.bus.name, 64, 48)
+    try:
+        assert client.get("/api/frame.jpg").status_code == 503  # bus but no frame
+        ring.write(np.zeros((48, 64, 3), dtype=np.uint8), 1)
+        ring.write(np.full((48, 64, 3), 200, dtype=np.uint8), 2)
+        response = client.get("/api/frame.jpg")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
+        image = cv2.imdecode(np.frombuffer(response.content, np.uint8), cv2.IMREAD_COLOR)
+        assert image.shape == (48, 64, 3)
+        assert abs(int(image.mean()) - 200) <= 2  # newest frame, not the first
+        # The request's read-only attach must not break the writer's ring.
+        ring.write(np.zeros((48, 64, 3), dtype=np.uint8), 3)
+    finally:
+        ring.close()
+        ring.unlink()
 
 
 def test_point_confirm_and_rally_reset_endpoints(tmp_path) -> None:

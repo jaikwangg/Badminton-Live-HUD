@@ -143,11 +143,10 @@
     ];
   }
 
-  $("#court-image").addEventListener("change", (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  function useCalibrationImage(blob, source) {
     const next = new Image();
     next.onload = () => {
+      URL.revokeObjectURL(next.src);
       image = next;
       // Canvas keeps the source resolution so corners_px are in original frame pixels.
       canvas.width = image.naturalWidth;
@@ -156,9 +155,29 @@
       corners = [];
       drawCalibration();
       updateCalibrationUi();
-      setStatus("#calibration-status", `ภาพ ${image.naturalWidth}×${image.naturalHeight}`);
+      setStatus("#calibration-status", `${source} ${image.naturalWidth}×${image.naturalHeight}`);
     };
-    next.src = URL.createObjectURL(file);
+    next.onerror = () => setStatus("#calibration-status", "เปิดภาพไม่ได้", true);
+    next.src = URL.createObjectURL(blob);
+  }
+
+  $("#load-frame").addEventListener("click", async () => {
+    try {
+      const response = await fetch(`${API}/api/frame.jpg`, { cache: "no-store" });
+      if (response.status === 503) {
+        setStatus("#calibration-status", "ยังไม่มีภาพจากกล้อง ตรวจว่ากล้องทำงานอยู่ หรือเลือกไฟล์ภาพแทน", true);
+        return;
+      }
+      if (!response.ok) throw new Error(`โหลดภาพกล้องไม่ได้ (${response.status})`);
+      useCalibrationImage(await response.blob(), "ภาพกล้อง");
+    } catch (error) {
+      setStatus("#calibration-status", error.message, true);
+    }
+  });
+
+  $("#court-image").addEventListener("change", (event) => {
+    const file = event.target.files?.[0];
+    if (file) useCalibrationImage(file, "ภาพ");
   });
 
   canvas.addEventListener("pointerdown", (event) => {

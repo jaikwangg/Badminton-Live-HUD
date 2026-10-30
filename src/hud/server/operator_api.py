@@ -3,26 +3,71 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from multiprocessing import resource_tracker
 from pathlib import Path
 from typing import Any
 
+from hud.bus.shm_ring import SharedFrameRing
+from hud.config import AppConfig
 from hud.fusion.state import FusionState
 
 _OPERATOR_DIR = Path(__file__).resolve().parents[3] / "web" / "operator"
 
 
-def create_operator_app(state: FusionState) -> Any:
+def read_frame_jpeg(config: AppConfig) -> bytes | None:
+    """Encode the newest complete frame on the bus, or None when there is no bus or frame."""
+    import cv2
+    import numpy as np
+
     try:
-        from fastapi import FastAPI, HTTPException
+        ring = SharedFrameRing(
+            config.bus.name,
+            config.source.width,
+            config.source.height,
+            config.bus.slots,
+            create=False,
+        )
+    except (FileNotFoundError, ValueError):
+        return None
+    try:
+        if os.name != "nt":
+            # Attaching registers the segment with the resource tracker, which would unlink
+            # the capture's ring when this server exits; the creator owns its lifetime.
+            resource_tracker.unregister(ring.shm._name, "shared_memory")  # type: ignore[attr-defined]
+        frame = ring.read_latest()
+    except (ValueError, IndexError):  # struct.error is a ValueError: ring smaller than config
+        return None
+    finally:
+        ring.close()
+    if frame is None:
+        return None
+    image = np.frombuffer(frame.image, dtype=np.uint8).reshape(frame.height, frame.width, 3)
+    ok, encoded = cv2.imencode(".jpg", image)
+    return encoded.tobytes() if ok else None
+
+
+def create_operator_app(state: FusionState, config: AppConfig | None = None) -> Any:
+    try:
+        from fastapi import FastAPI, HTTPException, Response
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
         raise RuntimeError("Install FastAPI and Uvicorn to run the operator API") from exc
 
     app = FastAPI()
+    app_config = config or AppConfig()
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return state.snapshot(drain_events=False)["health"]
+
+    @app.get("/api/frame.jpg")
+    async def frame_jpg() -> Response:
+        # Off the event loop: copying and encoding a full frame takes milliseconds.
+        jpeg = await asyncio.to_thread(read_frame_jpeg, app_config)
+        if jpeg is None:
+            raise HTTPException(status_code=503, detail="No camera frame on the frame bus yet")
+        return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.post("/api/calibrate")
     async def calibrate(payload: dict[str, Any]) -> dict[str, Any]:
@@ -99,7 +144,7 @@ async def serve(config_path: str | None = None) -> None:
     state = FusionState()
     ws_config = uvicorn.Config(create_ws_app(state), host="0.0.0.0", port=config.server["ws_port"])
     http_config = uvicorn.Config(
-        create_operator_app(state), host="0.0.0.0", port=config.server["http_port"]
+        create_operator_app(state, config), host="0.0.0.0", port=config.server["http_port"]
     )
     ws_server = uvicorn.Server(ws_config)
     http_server = uvicorn.Server(http_config)
