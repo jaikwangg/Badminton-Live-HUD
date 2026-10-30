@@ -15,15 +15,13 @@ from scipy.optimize import linear_sum_assignment
 
 from hud.bus.messages import HeartbeatMessage, HitMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import COURT_LENGTH_M, load_homography, transform_point
+from hud.fusion.kalman import ShuttleKalmanFilter
+from hud.fusion.rally_fsm import RallyFSM
+from hud.fusion.stats import ShotDetector, ShotInfo
 
 _WORKERS = ("players", "shuttle", "audio")
 _NET_X_M = COURT_LENGTH_M / 2
-# ponytail: identity constants are not in config/default.yaml (T01-owned); move them there
-# once tuned on a real doubles clip. Window = past-only stand-in for the LESSONS +/-45 frames.
-_APP_WINDOW_FRAMES = 90
-_APP_WEIGHT_M = 2.0  # metres of position cost per unit of L1 appearance distance
-# Larger than any court distance plus appearance term, so the net line decides side first.
-_SIDE_MISMATCH_COST = 100.0
+_HEARTBEAT_TIMEOUT_S = 3.0
 
 
 def _min_cost_pairs(costs: list[list[float]]) -> list[tuple[int, int]]:
@@ -94,16 +92,39 @@ def validate_game_state(value: dict[str, Any]) -> None:
 class FusionState:
     """Thread-safe mutable match snapshot; unknown Contract fields remain explicit nulls."""
 
-    def __init__(self, calibration_path: str | Path = "config/court_calib.json") -> None:
+    def __init__(
+        self,
+        calibration_path: str | Path = "config/court_calib.json",
+        fusion: dict[str, Any] | None = None,
+    ) -> None:
         self._lock = threading.RLock()
         self.calibration_path = Path(calibration_path)
         self.homography = load_homography(self.calibration_path)
+        # Tunables from config `fusion`; a missing section or key keeps the default.
+        identity = (fusion or {}).get("identity") or {}
+        rally = (fusion or {}).get("rally") or {}
+        shuttle = (fusion or {}).get("shuttle") or {}
+        # Window = past-only stand-in for the LESSONS +/-45 frames.
+        self._app_window_frames = int(identity.get("app_window_frames", 90))
+        # Metres of position cost per unit of L1 appearance distance.
+        self._app_weight_m = float(identity.get("app_weight_m", 2.0))
+        # Larger than any court distance plus appearance term, so the net line decides side.
+        self._side_mismatch_cost = float(identity.get("side_mismatch_cost", 100.0))
+        self._kf = ShuttleKalmanFilter(max_px_per_s=shuttle.get("max_px_per_s"))
+        self._fsm = RallyFSM(
+            homography=self.homography, end_gap_ms=float(rally.get("end_gap_ms", 1800.0))
+        )
+        self._shots = ShotDetector(
+            match_window_ms=float(rally.get("shot_match_window_ms", 100.0)),
+            refractory_ms=float(rally.get("shot_refractory_ms", 200.0)),
+        )
         self._workers = {
             name: {"status": "down", "last_seen": 0.0, "fps": None} for name in _WORKERS
         }
         self._latencies_ms: deque[float] = deque(maxlen=256)
         self._events: list[dict[str, Any]] = []
-        self._pending_points: dict[int, int | None] = {}
+        # Point suggestions awaiting the operator, keyed by event ts.
+        self._pending_points: dict[int, dict[str, Any]] = {}
         self._track_to_id: dict[int, int] = {}
         self._mode = "singles"
         self._player_config: dict[int, dict[str, Any]] = {}
@@ -184,7 +205,9 @@ class FusionState:
                         continue
                     side = None if court_xy is None else int(court_xy[0] > _NET_X_M)
                     player_id = assigned[detection.track_id]
-                    apps = self._app_history.setdefault(player_id, deque(maxlen=_APP_WINDOW_FRAMES))
+                    apps = self._app_history.setdefault(
+                        player_id, deque(maxlen=self._app_window_frames)
+                    )
                     # A length change (config edit) restarts the window instead of mixing.
                     if detection.app is not None:
                         if apps and len(apps[0]) != len(detection.app):
@@ -225,16 +248,28 @@ class FusionState:
             elif kind == "shuttle":
                 decoded = ShuttleMessage.from_json(payload)
                 self._record_latency(decoded.ts)
-                self._shuttle.update(
-                    status="tracked" if decoded.visible else "lost",
-                    img_xy=decoded.px if decoded.visible else None,
-                )
+                res = self._kf.update(decoded.visible, decoded.px, decoded.ts)
+                self._shuttle.update(status=res.status, img_xy=res.px)
+                self._fsm.on_shuttle_update(res.status, self._kf.last_seen_px, decoded.ts)
+                if res.direction_changed:
+                    audio = self._workers["audio"]
+                    audio_ok = (
+                        audio["status"] == "ok" and now - audio["last_seen"] <= _HEARTBEAT_TIMEOUT_S
+                    )
+                    self._on_shot(
+                        self._shots.register_direction_change(
+                            decoded.ts,
+                            px=res.px,
+                            players=[p for p in self._players.values() if p["tracked"]],
+                            audio_degraded=not audio_ok,
+                        )
+                    )
+                self._sync_rally()
             elif kind == "hit":
                 decoded = HitMessage.from_json(payload)
                 self._record_latency(decoded.ts)
-                self._events.append(
-                    {"ts": decoded.ts, "kind": "shot", "data": {"strength": decoded.strength}}
-                )
+                self._on_shot(self._shots.register_audio_hit(decoded.ts, decoded.strength))
+                self._sync_rally()
             elif kind == "heartbeat":
                 decoded = HeartbeatMessage.from_json(payload)
                 if decoded.worker not in _WORKERS:
@@ -249,6 +284,7 @@ class FusionState:
 
         with self._lock:
             self.homography = save_homography(self.calibration_path, corners_px)
+            self._fsm.homography = self.homography
 
     def set_players(self, players: list[dict[str, Any]], mode: str = "singles") -> None:
         if mode not in ("singles", "doubles"):
@@ -283,6 +319,7 @@ class FusionState:
                 self._app_history.clear()
                 self._track_to_id.clear()
             self._mode = new_mode
+            self._fsm.mode = new_mode
             # Legacy bodies without `team` keep the old meaning: team = starting side.
             self._player_config = {
                 int(player["id"]): {"team": player["side"], **player} for player in players
@@ -301,30 +338,40 @@ class FusionState:
         with self._lock:
             self._score[team] = (self._score[team] or 0) + delta
 
-    def suggest_point(self, event_ts: int, suggested_side: int | None) -> None:
-        if suggested_side not in (None, 0, 1):
-            raise ValueError("suggested side must be 0, 1, or null")
+    def suggest_point(
+        self, event_ts: int, suggested_side: int | None, suggested_team: int | None = None
+    ) -> None:
+        if suggested_side not in (None, 0, 1) or suggested_team not in (None, 0, 1):
+            raise ValueError("suggested side and team must be 0, 1, or null")
+        data = {"suggested_side": suggested_side, "suggested_team": suggested_team}
         with self._lock:
-            self._pending_points[event_ts] = suggested_side
-            self._events.append(
-                {
-                    "ts": event_ts,
-                    "kind": "point_suggested",
-                    "data": {"suggested_side": suggested_side},
-                }
-            )
+            self._pending_points[event_ts] = data
+            self._events.append({"ts": event_ts, "kind": "point_suggested", "data": data})
 
     def confirm_point(self, event_ts: int, accept: bool) -> None:
         with self._lock:
             if event_ts not in self._pending_points:
                 raise ValueError("No pending point suggestion for event_ts")
-            suggested_side = self._pending_points.pop(event_ts)
-            if accept and suggested_side is not None:
-                self._score[suggested_side] = (self._score[suggested_side] or 0) + 1
+            data = self._pending_points.pop(event_ts)
+            team = data.get("suggested_team")
+            side = data.get("suggested_side")
+            if team is None and side is not None:
+                # Score is indexed by team; after an end change a side holds the other team.
+                team = next(
+                    (
+                        self._player_config.get(slot, {}).get("team", slot % 2)
+                        for slot in range(self._player_count)
+                        if self._slot_side(slot) == side
+                    ),
+                    None,
+                )
+            if accept and team is not None:
+                self._score[team] = (self._score[team] or 0) + 1
 
     def reset_rally(self) -> None:
         with self._lock:
-            self._rally = {"active": False, "n": 0, "t_ms": 0, "shots": 0}
+            self._fsm.reset_to_idle()
+            self._sync_rally()
             self._pending_points.clear()
 
     def swap_ids(self, first: int, second: int) -> None:
@@ -345,8 +392,8 @@ class FusionState:
             )
             # Appearance follows the track too, so the next match keeps the operator's swap.
             self._app_history[first], self._app_history[second] = (
-                self._app_history.get(second, deque(maxlen=_APP_WINDOW_FRAMES)),
-                self._app_history.get(first, deque(maxlen=_APP_WINDOW_FRAMES)),
+                self._app_history.get(second, deque(maxlen=self._app_window_frames)),
+                self._app_history.get(first, deque(maxlen=self._app_window_frames)),
             )
             self._players[first], self._players[second] = (
                 self._players.get(second),
@@ -370,7 +417,7 @@ class FusionState:
         with self._lock:
             health_workers: dict[str, str] = {}
             for name, worker in self._workers.items():
-                if now - worker["last_seen"] > 3.0:
+                if now - worker["last_seen"] > _HEARTBEAT_TIMEOUT_S:
                     worker["status"] = "down"
                 health_workers[name] = worker["status"]
             latencies = sorted(self._latencies_ms)
@@ -410,6 +457,27 @@ class FusionState:
             }
             validate_game_state(result)
             return result
+
+    def _on_shot(self, shot: ShotInfo | None) -> None:
+        if shot is not None:
+            self._fsm.on_shot(shot)
+
+    def _sync_rally(self) -> None:
+        """Copy rally FSM output into the snapshot and queue its new events."""
+        self._rally = self._fsm.get_rally_dict()
+        # The newest shot's speed needs its return, so show the answered shot: by and
+        # speed_kmh_est then always describe the same shot.
+        shot = self._fsm.prev_shot
+        self._shuttle["landing_xy_m_est"] = self._fsm.landing_xy_m_est
+        self._shuttle["last_shot"] = {
+            "by": shot.by if shot else None,
+            "speed_kmh_est": shot.speed_kmh_est if shot else None,
+            "type": shot.type if shot else None,
+        }
+        for event in self._fsm.drain_events():
+            if event["kind"] == "point_suggested":
+                self._pending_points[event["ts"]] = event["data"]
+            self._events.append(event)
 
     def _empty_player(self, player_id: int) -> dict[str, Any]:
         metadata = self._player_config.get(player_id, {})
@@ -453,13 +521,13 @@ class FusionState:
         median: list[float] | None,
     ) -> float:
         side = int(court_xy[0] > _NET_X_M)
-        cost = 0.0 if self._slot_side(slot) == side else _SIDE_MISMATCH_COST
+        cost = 0.0 if self._slot_side(slot) == side else self._side_mismatch_cost
         previous = self._player_history.get(slot)
         if previous is not None:
             cost += math.dist(court_xy, previous[1:])
         # Unknown appearance on either end falls back to position only.
         if app is not None and median is not None and len(app) == len(median):
-            cost += _APP_WEIGHT_M * sum(abs(a - b) for a, b in zip(app, median, strict=True))
+            cost += self._app_weight_m * sum(abs(a - b) for a, b in zip(app, median, strict=True))
         return cost
 
     def _court_point(self, point_px: list[float]) -> list[float] | None:

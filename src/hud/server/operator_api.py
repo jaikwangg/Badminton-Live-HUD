@@ -96,7 +96,8 @@ async def serve(config_path: str | None = None) -> None:
     from hud.server.ws_server import create_ws_app, ingest_worker_messages
 
     config = load_config(config_path)
-    state = FusionState()
+    # `fusion` is a plain dict from config; older configs without it keep the defaults.
+    state = FusionState(fusion=getattr(config, "fusion", {}) or {})
     ws_config = uvicorn.Config(create_ws_app(state), host="0.0.0.0", port=config.server["ws_port"])
     http_config = uvicorn.Config(
         create_operator_app(state), host="0.0.0.0", port=config.server["http_port"]
