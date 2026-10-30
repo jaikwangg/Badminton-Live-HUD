@@ -44,6 +44,14 @@ workers:
   audio:
     enabled: false
     command: [python, -m, hud.workers.audio]
+    sample_rate: 44100  # Hz
+    chunk_size: 1024  # samples per input callback
+    offset_ms: 0.0  # added to hit ts to align mic latency with video
+    low_freq: 2000.0  # band-pass low edge (Hz); racket hits sit in 2-8 kHz (LESSONS)
+    high_freq: 8000.0  # band-pass high edge (Hz)
+    refractory_ms: 150.0  # ignore further onsets this long after a hit
+    sensitivity: 3.5  # onset threshold as a multiple of the adaptive noise floor
+    queue_chunks: 8  # audio chunks buffered between callback and main thread
 supervisor:
   heartbeat_timeout_s: 3
   poll_interval_s: 0.25

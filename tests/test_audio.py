@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from threading import Event
 from unittest.mock import patch
 
@@ -14,6 +16,11 @@ from hud.workers.audio import (
     AudioWorker,
     has_audio_input_device,
 )
+
+try:
+    import sounddevice  # noqa: F401
+except (ImportError, OSError):  # not installed, or PortAudio missing: stub it so patch() works
+    sys.modules["sounddevice"] = types.SimpleNamespace(query_devices=None, InputStream=None)
 
 
 class FakePublisher:

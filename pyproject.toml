@@ -7,10 +7,26 @@ name = "badminton-live-hud"
 version = "0.1.0"
 description = "Real-time badminton HUD pipeline"
 requires-python = ">=3.11,<3.12"
-dependencies = ["PyYAML>=6.0"]
+dependencies = [
+    "PyYAML>=6.0",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.8",
+    "pillow>=12.0",
+    "pyzmq>=27.0",
+    "websockets>=17.0",
+    "fastapi>=0.100",
+    "uvicorn>=0.30",
+    "scipy>=1.11",
+    "sounddevice>=0.4",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+# Model runtimes, imported lazily. Ultralytics is AGPL-3.0 (docs/REFERENCES.md).
+# GPU deployments install onnxruntime-gpu, TensorRT and pycuda separately.
+models = ["ultralytics>=8.0", "onnxruntime>=1.16"]
+# tools/export_trt.py only.
+export = ["torch>=2.0", "onnx>=1.14"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
