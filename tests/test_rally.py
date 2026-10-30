@@ -377,7 +377,7 @@ _DOUBLES = [
 
 
 def test_rally_fsm_takes_hitter_side_from_alternation_and_never_drops_same_side() -> None:
-    fsm = RallyFSM(mode="doubles")
+    fsm = RallyFSM(mode="doubles", alternation="always")
     fsm.on_shot(ShotInfo(ts=1, by=0, speed_kmh_est=None, side=0, team=0))
     # Image-nearest is near player 1 (the far player stands under his racket in the image),
     # but the shot after a near shot comes from the far side: nearest far player 3.
@@ -403,6 +403,33 @@ def test_rally_fsm_takes_hitter_side_from_alternation_and_never_drops_same_side(
     assert fsm.last_shot is not None and fsm.last_shot.ts == 4
     (event,) = fsm.drain_events()
     assert event["data"]["replaces_ts"] == 3
+
+
+@pytest.mark.parametrize(
+    ("alternation", "first_evidence", "expected"),
+    [
+        ("audio", 1.6, (3, 1)),  # after an audio-confirmed shot: alternation decides
+        ("audio", 0.5, (1, 0)),  # after a vision-only shot: the detector's attribution stands
+        ("off", 1.6, (1, 0)),
+        ("always", 0.5, (3, 1)),
+    ],
+)
+def test_rally_fsm_alternation_modes(
+    alternation: str, first_evidence: float, expected: tuple[int, int]
+) -> None:
+    fsm = RallyFSM(mode="doubles", alternation=alternation)
+    fsm.on_shot(ShotInfo(ts=1, by=0, speed_kmh_est=None, side=0, team=0, evidence=first_evidence))
+    shot = ShotInfo(
+        ts=2, by=1, speed_kmh_est=None, side=0, team=0, px=[450, 450], candidates=_DOUBLES
+    )
+    fsm.on_shot(shot)
+    assert (shot.by, shot.side) == expected
+    assert fsm.shots_count == 2  # kept as a new shot in every mode
+
+
+def test_rally_fsm_rejects_unknown_alternation_mode() -> None:
+    with pytest.raises(ValueError):
+        RallyFSM(alternation="sometimes")
 
 
 def test_serve_is_attributed_by_bbox_height_normalised_distance() -> None:

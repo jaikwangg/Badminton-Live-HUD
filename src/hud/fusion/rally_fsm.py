@@ -40,9 +40,17 @@ class RallyFSM:
         landing_margin_m: float = 1.0,
         rest_landing_ms: float = 3000.0,
         serve_still_ms: float = 2000.0,
+        alternation: str = "audio",
     ) -> None:
         if mode not in {"singles", "doubles"}:
             raise ValueError("mode must be 'singles' or 'doubles'")
+        if alternation not in {"audio", "always", "off"}:
+            raise ValueError("alternation must be 'audio', 'always' or 'off'")
+        # When the side of a shot comes from alternation: "always", "off", or "audio" = only
+        # after an audio-confirmed shot. Vision-only candidates are about half false (accuracy
+        # run 1), and one false shot would flip every later side of the rally.
+        # Proposed config key: `fusion.rally.alternation`.
+        self.alternation = alternation
         self.mode = mode
         # Image -> court homography; the caller keeps it in sync with calibration.
         self.homography = homography
@@ -126,9 +134,10 @@ class RallyFSM:
     def on_shot(self, shot: ShotInfo) -> None:
         """Record a confirmed shot; shots must alternate court sides.
 
-        Inside a rally the side comes from alternation (opposite of the previous accepted
-        shot) and the hitter is the nearest player on that side, so a candidate attributed
-        to the same side is re-attributed, never dropped. A candidate that replaces the
+        When alternation applies (see ``alternation``) the side comes from the previous
+        accepted shot and the hitter is the nearest player on the opposite side, so a
+        candidate attributed to the same side is re-attributed, never dropped. Otherwise the
+        detector's attribution stands. In every mode a candidate that replaces the
         last one (``replaces_ts``, same hit) takes its place. Only past shots are used, so
         this stays realtime.
 
@@ -152,7 +161,15 @@ class RallyFSM:
             self.shots_count += 1
             self.prev_shot = prev
         answered = self.prev_shot
-        if answered is not None and answered.side is not None and shot.side != 1 - answered.side:
+        if (
+            answered is not None
+            and answered.side is not None
+            and shot.side != 1 - answered.side
+            and (
+                self.alternation == "always"
+                or (self.alternation == "audio" and answered.evidence >= 1.0)
+            )
+        ):
             self._reattribute(shot, 1 - answered.side, answered.team)
         self.last_shot = shot
 
