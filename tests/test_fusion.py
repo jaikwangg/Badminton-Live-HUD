@@ -381,8 +381,43 @@ def test_new_track_falls_back_to_other_side_when_no_slot_is_free(tmp_path) -> No
     assert [p["side"] for p in players] == [0, 0]
 
 
+def _walk_state(tmp_path, positions: list[tuple[float, float]], **players: float) -> dict:
+    state = FusionState(tmp_path / "court_calib.json", fusion={"players": players})
+    state.calibrate([[0, 0], [100, 0], [100, 100], [0, 100]])
+    for frame_id, (x_m, y_m) in enumerate(positions, start=1):
+        message = PlayersMessage(
+            frame_id=frame_id,
+            ts=frame_id * 1_000_000_000 // 30,
+            players=[{"track_id": 10, **_foot(x_m, y_m)}],
+        )
+        state.ingest(message.to_json())
+    return state.snapshot()["players"][0]
+
+
+def test_stationary_jitter_adds_no_distance_but_walking_does(tmp_path) -> None:
+    import random
+
+    rng = random.Random(4)
+    # 30 s at 30 Hz standing at (3, 2) with ~5 cm foot jitter and 1.2 m single-frame flicker
+    # (pose ankle vs bbox bottom), as seen for the near-left player in a 180 s replay.
+    standing = [(3.0 + rng.gauss(0, 0.05), 2.0 + rng.gauss(0, 0.05)) for _ in range(900)]
+    for index in range(10, 900, 40):
+        standing[index] = (4.2, 2.0)
+    player = _walk_state(tmp_path, standing)
+    assert player["dist_m"] < 0.5
+    assert player["speed_mps"] < 0.1
+    # Walking 5 m toward the net (stays on side 0) at 1.5 m/s with the same jitter keeps
+    # the true distance.
+    walking = [(1.0 + 0.05 * i + rng.gauss(0, 0.05), 2.0 + rng.gauss(0, 0.05)) for i in range(101)]
+    player = _walk_state(tmp_path, walking)
+    assert player["dist_m"] == pytest.approx(5.0, abs=0.5)
+    assert player["speed_mps"] == pytest.approx(1.5, abs=0.4)
+
+
 def test_off_court_feet_do_not_skew_distance_or_matching(tmp_path) -> None:
-    state = _square_court_state(tmp_path)
+    # Raw positions: no median window, so 1 m steps count exactly.
+    state = FusionState(tmp_path / "court_calib.json", fusion={"players": {"median_frames": 1}})
+    state.calibrate([[0, 0], [100, 0], [100, 100], [0, 100]])
     off_court = {"bbox": [0, 0, 1, 50], "foot_px": [1, 50], "conf": 0.9}  # y < 0.46 m
     frames = [
         [{"track_id": 10, **_foot(3.0, 3.0)}],
@@ -634,9 +669,12 @@ def test_fusion_tunables_come_from_config(tmp_path) -> None:
         fusion={
             "identity": {"app_window_frames": 5, "side_mismatch_cost": 50},
             "rally": {"end_gap_ms": 500, "shot_match_window_ms": 80},
-            "shuttle": {"max_px_per_s": 3000},
+            "shuttle": {"max_px_per_s": 3000, "predict_ms": 100},
+            "players": {"median_frames": 3, "deadband_m": 0.2},
         },
     )
+    assert state._kf.predict_ns == 100_000_000
+    assert (state._median_frames, state._deadband_m) == (3, 0.2)
     assert (state._app_window_frames, state._app_weight_m, state._side_mismatch_cost) == (
         5,
         2.0,

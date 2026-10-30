@@ -110,7 +110,16 @@ class FusionState:
         self._app_weight_m = float(identity.get("app_weight_m", 2.0))
         # Larger than any court distance plus appearance term, so the net line decides side.
         self._side_mismatch_cost = float(identity.get("side_mismatch_cost", 100.0))
-        self._kf = ShuttleKalmanFilter(max_px_per_s=shuttle.get("max_px_per_s"))
+        # ponytail: T01 should add `fusion.players: {median_frames: 5, deadband_m: 0.15}` to
+        # config/default.yaml; until then these defaults apply. Picked by replaying a 180 s
+        # doubles WS log, not tuned against ground truth.
+        players = (fusion or {}).get("players") or {}
+        self._median_frames = max(1, int(players.get("median_frames", 5)))
+        self._deadband_m = float(players.get("deadband_m", 0.15))
+        self._kf = ShuttleKalmanFilter(
+            predict_ms=float(shuttle.get("predict_ms", 167.0)),
+            max_px_per_s=shuttle.get("max_px_per_s"),
+        )
         self._fsm = RallyFSM(
             homography=self.homography, end_gap_ms=float(rally.get("end_gap_ms", 1800.0))
         )
@@ -130,6 +139,8 @@ class FusionState:
         self._player_config: dict[int, dict[str, Any]] = {}
         self._players: dict[int, dict[str, Any]] = {}
         self._player_history: dict[int, tuple[int, float, float]] = {}
+        # Per slot: (recent court xy window, last counted position, its ts) for dist/speed.
+        self._motion: dict[int, tuple[deque[list[float]], list[float], int]] = {}
         self._app_history: dict[int, deque[list[float]]] = {}
         self._score: list[int | None] = [None, None]
         self._games: list[int | None] = [None, None]
@@ -234,18 +245,31 @@ class FusionState:
                     previous_player = self._players.get(player_id, {})
                     speed: float | None = None
                     distance: float | None = previous_player.get("dist_m")
-                    previous = self._player_history.get(player_id)
-                    if previous and court_xy:
-                        prev_ts, prev_x, prev_y = previous
-                        elapsed_s = (decoded.ts - prev_ts) / 1_000_000_000
+                    motion = self._motion.get(player_id)
+                    if court_xy is not None and motion is None:
+                        self._motion[player_id] = (
+                            deque([court_xy], maxlen=self._median_frames),
+                            court_xy,
+                            decoded.ts,
+                        )
+                    elif court_xy is not None and motion is not None:
+                        window, anchor_xy, anchor_ts = motion
+                        window.append(court_xy)
+                        # Past-only median drops single-frame foot flicker; the deadband
+                        # then ignores what jitter is left, so standing still adds ~0 m.
+                        filtered = [statistics.median(axis) for axis in zip(*window, strict=True)]
+                        moved = math.dist(filtered, anchor_xy)
+                        elapsed_s = (decoded.ts - anchor_ts) / 1_000_000_000
                         if elapsed_s > 0:
-                            step = (
-                                (court_xy[0] - prev_x) ** 2 + (court_xy[1] - prev_y) ** 2
-                            ) ** 0.5
-                            measured = step / elapsed_s
+                            # Over the time since the last counted step: a stationary
+                            # player's speed decays to 0 instead of tracking jitter.
+                            measured = moved / elapsed_s
                             old = previous_player.get("speed_mps")
                             speed = measured if old is None else 0.35 * measured + 0.65 * old
-                            distance = (distance or 0.0) + step
+                            distance = distance or 0.0
+                            if moved >= self._deadband_m:
+                                distance += moved
+                                self._motion[player_id] = (window, filtered, decoded.ts)
                     # Off-court feet have no court position; keep the last valid one instead.
                     if court_xy is not None:
                         self._player_history[player_id] = (decoded.ts, *court_xy)
@@ -335,6 +359,7 @@ class FusionState:
             if new_mode != self._mode:
                 self._players.clear()
                 self._player_history.clear()
+                self._motion.clear()
                 self._app_history.clear()
                 self._track_to_id.clear()
             self._mode = new_mode
@@ -409,6 +434,12 @@ class FusionState:
                 self._player_history.get(second),
                 self._player_history.get(first),
             )
+            for slot, value in (
+                (first, self._motion.pop(second, None)),
+                (second, self._motion.pop(first, None)),
+            ):
+                if value is not None:
+                    self._motion[slot] = value
             # Appearance follows the track too, so the next match keeps the operator's swap.
             self._app_history[first], self._app_history[second] = (
                 self._app_history.get(second, deque(maxlen=self._app_window_frames)),
