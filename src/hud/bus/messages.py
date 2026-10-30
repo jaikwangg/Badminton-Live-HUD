@@ -31,6 +31,7 @@ class PlayerDetection:
     bbox: list[float]
     foot_px: list[float]
     conf: float
+    app: list[float] | None = None
 
 
 @dataclass(slots=True)
