@@ -104,15 +104,21 @@ def export_onnx(
     return seq_len, bg_mode
 
 
-def build_engine(onnx_path: Path, engine_path: Path, *, fp16: bool) -> None:
+def build_engine(
+    onnx_path: Path, engine_path: Path, *, fp16: bool, workspace_mib: int = 4096
+) -> None:
+    """Build a static-shape engine with trtexec, or the TensorRT Python API without it."""
+    engine_path.parent.mkdir(parents=True, exist_ok=True)
     trtexec = shutil.which("trtexec")
     if trtexec is None:
-        raise FileNotFoundError("--engine was requested but trtexec was not found on PATH")
-    engine_path.parent.mkdir(parents=True, exist_ok=True)
+        _build_engine_python(onnx_path, engine_path, fp16=fp16, workspace_mib=workspace_mib)
+        print(f"engine: {engine_path}")
+        return
     command = [
         trtexec,
         f"--onnx={onnx_path}",
         f"--saveEngine={engine_path}",
+        f"--memPoolSize=workspace:{workspace_mib}M",
         "--skipInference",
     ]
     if fp16:
@@ -120,6 +126,45 @@ def build_engine(onnx_path: Path, engine_path: Path, *, fp16: bool) -> None:
     print("trtexec_command: " + " ".join(command), flush=True)
     subprocess.run(command, check=True)
     print(f"engine: {engine_path}")
+
+
+def _build_engine_python(
+    onnx_path: Path, engine_path: Path, *, fp16: bool, workspace_mib: int
+) -> None:
+    try:
+        import tensorrt as trt
+    except ImportError as exc:
+        raise RuntimeError(
+            "--engine needs trtexec on PATH or the TensorRT Python package (tensorrt-cu12)"
+        ) from exc
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)  # explicit batch is the only mode in TensorRT 10
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse_from_file(str(onnx_path)):
+        errors = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
+        raise RuntimeError(f"TensorRT could not parse {onnx_path}: {errors}")
+    for index in range(network.num_inputs):
+        tensor = network.get_input(index)
+        if any(dim < 0 for dim in tensor.shape):
+            raise ValueError(
+                f"ONNX input {tensor.name} has dynamic shape {tuple(tensor.shape)}; "
+                "export it with static shapes"
+            )
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_mib << 20)
+    if fp16:
+        config.set_flag(trt.BuilderFlag.FP16)
+    print(
+        f"tensorrt_python_build: trt={trt.__version__} fp16={fp16} workspace_mib={workspace_mib}",
+        flush=True,
+    )
+    serialized = builder.build_serialized_network(network, config)
+    if serialized is None:
+        raise RuntimeError(f"TensorRT failed to build an engine from {onnx_path}")
+    temporary_path = engine_path.with_name(f"{engine_path.name}.tmp")
+    temporary_path.write_bytes(bytes(serialized))
+    temporary_path.replace(engine_path)
 
 
 def export_yolo_onnx(weights: Path, *, imgsz: int) -> Path:
@@ -131,11 +176,27 @@ def export_yolo_onnx(weights: Path, *, imgsz: int) -> Path:
     return onnx_path
 
 
+def export_yolo_engine(weights: Path, engine_path: Path, *, imgsz: int, fp16: bool) -> None:
+    """Build the YOLO engine with Ultralytics, which prepends the metadata header
+    (task, kpt_shape, names) that hud.models.detector needs to load a .engine."""
+    from ultralytics import YOLO
+
+    built = Path(YOLO(str(weights)).export(format="engine", imgsz=imgsz, half=fp16, device=0))
+    engine_path.parent.mkdir(parents=True, exist_ok=True)
+    if built.resolve() != engine_path.resolve():
+        shutil.move(str(built), str(engine_path))
+    print(f"yolo_engine: {engine_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, help="External official TrackNetV3 clone")
     parser.add_argument("--ckpt", type=Path, help="TrackNet_best.pt checkpoint")
-    parser.add_argument("--onnx", type=Path, help="Output TrackNet ONNX file")
+    parser.add_argument(
+        "--onnx",
+        type=Path,
+        help="TrackNet ONNX output; without --repo/--ckpt, an existing ONNX for --engine",
+    )
     parser.add_argument("--engine", type=Path, help="Optional TrackNet TensorRT engine output")
     parser.add_argument("--yolo", type=Path, help="YOLO .pt weights to export via Ultralytics")
     parser.add_argument("--yolo-engine", type=Path, help="Optional YOLO TensorRT engine output")
@@ -143,23 +204,30 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=288)
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument(
+        "--workspace-mib", type=int, default=4096, help="TensorRT builder workspace limit"
+    )
     args = parser.parse_args()
     if args.width < 1 or args.height < 1:
         parser.error("--width and --height must be positive")
-    tracknet = (args.repo, args.ckpt, args.onnx)
-    if any(tracknet) and not all(tracknet):
+    if args.workspace_mib < 1:
+        parser.error("--workspace-mib must be positive")
+    export_tracknet = args.repo is not None or args.ckpt is not None
+    if export_tracknet and not (args.repo and args.ckpt and args.onnx):
         parser.error("TrackNet export needs --repo, --ckpt and --onnx together")
-    if not all(tracknet) and args.yolo is None:
-        parser.error("nothing to export: give --repo/--ckpt/--onnx and/or --yolo")
+    engine_only = not export_tracknet and args.onnx is not None and args.engine is not None
+    if not (export_tracknet or engine_only or args.yolo is not None):
+        parser.error("nothing to export: give --repo/--ckpt/--onnx, --onnx/--engine or --yolo")
 
-    if all(tracknet):
+    if export_tracknet:
         export_onnx(args.repo, args.ckpt, args.onnx, width=args.width, height=args.height)
-        if args.engine is not None:
-            build_engine(args.onnx, args.engine, fp16=args.fp16)
+    if (export_tracknet or engine_only) and args.engine is not None:
+        build_engine(args.onnx, args.engine, fp16=args.fp16, workspace_mib=args.workspace_mib)
     if args.yolo is not None:
-        yolo_onnx = export_yolo_onnx(args.yolo, imgsz=args.imgsz)
         if args.yolo_engine is not None:
-            build_engine(yolo_onnx, args.yolo_engine, fp16=args.fp16)
+            export_yolo_engine(args.yolo, args.yolo_engine, imgsz=args.imgsz, fp16=args.fp16)
+        else:
+            export_yolo_onnx(args.yolo, imgsz=args.imgsz)
 
 
 if __name__ == "__main__":
