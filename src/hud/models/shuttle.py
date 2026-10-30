@@ -62,19 +62,26 @@ class ShuttleTracker(Protocol):
     ) -> tuple[bool, list[float] | None, float | None]: ...
 
 
+def _cuda_check(result: tuple[Any, ...]) -> Any:
+    """Unpack a cuda-bindings ``(error, *values)`` tuple, raising on any CUDA error."""
+    error, *values = result
+    if int(error) != 0:
+        raise RuntimeError(f"CUDA runtime call failed: {error!r}")
+    return values[0] if values else None
+
+
 class TensorRTSession:
-    """TensorRT 10+ adapter for a serialized engine and one CUDA context."""
+    """TensorRT 10+ adapter for a serialized engine; device memory via cuda-bindings' runtime."""
 
     def __init__(self, path: str | Path) -> None:
         try:
-            import pycuda.autoinit  # noqa: F401
-            import pycuda.driver as cuda
             import tensorrt as trt
+            from cuda.bindings import runtime as cudart
         except ImportError as exc:
             raise RuntimeError(
-                "Install TensorRT and PyCUDA to load a .engine shuttle model"
+                "Install tensorrt-cu12 and cuda-bindings to load a .engine shuttle model"
             ) from exc
-        self._cuda = cuda
+        self._cudart = cudart
         self._trt = trt
         self._logger = trt.Logger(trt.Logger.ERROR)
         runtime = trt.Runtime(self._logger)
@@ -82,7 +89,7 @@ class TensorRTSession:
         if self._engine is None or not hasattr(self._engine, "num_io_tensors"):
             raise RuntimeError("TensorRT 10 or newer and a valid serialized engine are required")
         self._context = self._engine.create_execution_context()
-        self._stream = cuda.Stream()
+        self._stream = _cuda_check(cudart.cudaStreamCreate())
         self._names = [self._engine.get_tensor_name(i) for i in range(self._engine.num_io_tensors)]
         self._inputs = [
             name
@@ -90,7 +97,8 @@ class TensorRTSession:
             if self._engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
         ]
         self._outputs = [name for name in self._names if name not in self._inputs]
-        self._buffers: dict[str, tuple[tuple[int, ...], np.dtype[Any], Any]] = {}
+        # name -> (shape, dtype, device pointer)
+        self._buffers: dict[str, tuple[tuple[int, ...], np.dtype[Any], int]] = {}
 
     def get_inputs(self) -> list[TensorInfo]:
         return [
@@ -102,45 +110,47 @@ class TensorRTSession:
             TensorInfo(name, tuple(self._engine.get_tensor_shape(name))) for name in self._outputs
         ]
 
-    def _buffer(self, name: str, shape: tuple[int, ...], dtype: np.dtype[Any]) -> Any:
+    def _buffer(self, name: str, shape: tuple[int, ...], dtype: np.dtype[Any]) -> int:
         current = self._buffers.get(name)
         if current is not None and current[0] == shape and current[1] == dtype:
             return current[2]
         if current is not None:
-            current[2].free()
-        allocation = self._cuda.mem_alloc(int(np.prod(shape)) * dtype.itemsize)
-        self._buffers[name] = (shape, dtype, allocation)
-        return allocation
+            _cuda_check(self._cudart.cudaFree(current[2]))
+        pointer = int(_cuda_check(self._cudart.cudaMalloc(int(np.prod(shape)) * dtype.itemsize)))
+        self._buffers[name] = (shape, dtype, pointer)
+        return pointer
+
+    def _copy(self, destination: int, source: int, size: int, kind: Any) -> None:
+        _cuda_check(self._cudart.cudaMemcpyAsync(destination, source, size, kind, self._stream))
 
     def run(
         self, output_names: list[str] | None, values: dict[str, np.ndarray]
     ) -> list[np.ndarray]:
-        host_inputs: dict[str, np.ndarray] = {}
+        kinds = self._cudart.cudaMemcpyKind
+        host_inputs: list[np.ndarray] = []  # kept alive until the stream is synchronised
         for name, value in values.items():
             dtype = self._trt.nptype(self._engine.get_tensor_dtype(name))
             host = np.ascontiguousarray(value, dtype=dtype)
-            host_inputs[name] = host
+            host_inputs.append(host)
             buffer = self._buffer(name, tuple(host.shape), host.dtype)
-            self._cuda.memcpy_htod_async(buffer, host, self._stream)
-            self._context.set_tensor_address(name, int(buffer))
+            self._copy(buffer, host.ctypes.data, host.nbytes, kinds.cudaMemcpyHostToDevice)
+            self._context.set_tensor_address(name, buffer)
 
-        outputs: list[tuple[np.ndarray, Any]] = []
+        outputs: list[tuple[np.ndarray, int]] = []
         for name in output_names or self._outputs:
             shape = tuple(int(dim) for dim in self._context.get_tensor_shape(name))
             dtype = np.dtype(self._trt.nptype(self._engine.get_tensor_dtype(name)))
             host = np.empty(shape, dtype=dtype)
             buffer = self._buffer(name, shape, dtype)
-            self._context.set_tensor_address(name, int(buffer))
+            self._context.set_tensor_address(name, buffer)
             outputs.append((host, buffer))
 
-        if not self._context.execute_async_v3(self._stream.handle):
+        if not self._context.execute_async_v3(int(self._stream)):
             raise RuntimeError("TensorRT shuttle inference failed")
-        results: list[np.ndarray] = []
         for host, buffer in outputs:
-            self._cuda.memcpy_dtoh_async(host, buffer, self._stream)
-            results.append(host)
-        self._stream.synchronize()
-        return results
+            self._copy(host.ctypes.data, buffer, host.nbytes, kinds.cudaMemcpyDeviceToHost)
+        _cuda_check(self._cudart.cudaStreamSynchronize(self._stream))
+        return [host for host, _ in outputs]
 
 
 class TrackNetV3Tracker:
