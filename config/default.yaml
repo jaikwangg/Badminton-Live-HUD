@@ -33,6 +33,7 @@ workers:
 supervisor:
   heartbeat_timeout_s: 3
   poll_interval_s: 0.25
+  startup_grace_s: 30  # seconds a fresh worker may load (e.g. a model) before its first heartbeat
 server:
   ws_port: 8765
   http_port: 8080
