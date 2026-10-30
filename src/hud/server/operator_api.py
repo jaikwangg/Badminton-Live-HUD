@@ -10,7 +10,8 @@ from hud.bus.shm_ring import SharedFrameRing
 from hud.config import AppConfig
 from hud.fusion.state import FusionState
 
-_OPERATOR_DIR = Path(__file__).resolve().parents[3] / "web" / "operator"
+_WEB_DIR = Path(__file__).resolve().parents[3] / "web"
+_OPERATOR_DIR = _WEB_DIR / "operator"
 
 
 def read_frame_jpeg(config: AppConfig) -> bytes | None:
@@ -44,6 +45,7 @@ def read_frame_jpeg(config: AppConfig) -> bytes | None:
 def create_operator_app(state: FusionState, config: AppConfig | None = None) -> Any:
     try:
         from fastapi import FastAPI, HTTPException, Response
+        from fastapi.responses import RedirectResponse
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
         raise RuntimeError("Install FastAPI and Uvicorn to run the operator API") from exc
@@ -121,7 +123,13 @@ def create_operator_app(state: FusionState, config: AppConfig | None = None) -> 
         state.reset_rally()
         return {"ok": True}
 
-    # Mounted last so the API routes above take precedence; serves the page at `/`.
+    @app.get("/overlay", include_in_schema=False)
+    async def overlay_slash() -> RedirectResponse:
+        # The overlay loads overlay.js/css relatively, which needs the trailing slash.
+        return RedirectResponse("/overlay/")
+
+    # Mounted last so the API routes above take precedence; OBS browser source uses /overlay/.
+    app.mount("/overlay", StaticFiles(directory=_WEB_DIR / "overlay", html=True), name="overlay")
     app.mount("/", StaticFiles(directory=_OPERATOR_DIR, html=True), name="operator")
     return app
 

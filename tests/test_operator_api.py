@@ -67,3 +67,15 @@ def test_operator_page_is_served_without_shadowing_api(tmp_path) -> None:
     assert 'src="operator.js"' in page.text
     assert client.get("/operator.js").status_code == 200
     assert client.get("/health").json()["workers"]
+
+
+def test_overlay_page_is_served_next_to_operator_page(tmp_path) -> None:
+    client = TestClient(create_operator_app(FusionState(tmp_path / "court_calib.json")))
+    overlay = client.get("/overlay/")
+    assert overlay.status_code == 200
+    assert "overlay.js" in overlay.text
+    assert client.get("/overlay/overlay.js").status_code == 200
+    # Without the slash the relative overlay.js/css would resolve to /, so it must redirect.
+    assert client.get("/overlay", follow_redirects=False).status_code in (301, 307)
+    assert "overlay.js" not in client.get("/").text
+    assert client.get("/health").status_code == 200
