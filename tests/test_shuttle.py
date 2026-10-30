@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import sys
+import types
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import numpy as np
 import pytest
@@ -199,3 +204,73 @@ def test_infer_error_emits_lost_message_and_worker_keeps_running() -> None:
     assert message.conf is None
     assert worker.processed == 8
     assert '"type":"heartbeat"' in publisher.messages[-1]
+
+
+class SlowTracker(FakeTracker):
+    """Blocks inference until released, like CPU fallback running slower than the camera."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = Event()
+
+    def infer(
+        self, frames: Sequence[ResizedFrame], background: np.ndarray
+    ) -> tuple[bool, list[float] | None, float | None]:
+        self.release.wait(5.0)
+        return super().infer(frames, background)
+
+
+def test_slow_inference_keeps_heartbeat_and_uses_newest_window() -> None:
+    tracker, publisher = SlowTracker(), FakePublisher()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = ShuttleWorker(
+            tracker,
+            publisher,
+            max_gap=1,
+            background=FixedBackground(np.zeros((18, 32, 3), dtype=np.uint8)),
+            executor=pool,
+        )
+        for frame_id in range(1, 13):
+            worker.process(_raw_frame(frame_id))
+        worker.last_heartbeat = 0.0
+        worker.process(_raw_frame(13))
+
+        messages = [json.loads(message) for message in publisher.messages]
+        shuttle = [message for message in messages if message["type"] == "shuttle"]
+        # Frames 1-7 were not inferred; 9-13 were cached while frame 8 was still running.
+        assert [message["frame_id"] for message in shuttle] == list(range(1, 8))
+        assert all(message["conf"] is None for message in shuttle)
+        assert messages[-1]["type"] == "heartbeat"
+
+        tracker.release.set()
+        assert worker._pending is not None
+        worker._pending[1].result(timeout=5.0)
+        worker.process(_raw_frame(14))
+        worker._pending[1].result(timeout=5.0)
+
+    result = ShuttleMessage.from_json(publisher.messages[-1])
+    assert (result.frame_id, result.visible, result.conf) == (8, True, 0.8)
+    assert [frame.frame_id for frame in tracker.calls[1][0]] == list(range(7, 15))
+
+
+class ProviderSession(FakeSession):
+    def __init__(self, path: str, providers: list[str]) -> None:
+        super().__init__()
+        self.requested = providers
+
+    def get_providers(self) -> list[str]:
+        return ["CPUExecutionProvider"]
+
+
+def test_cuda_fallback_to_cpu_marks_tracker_degraded(monkeypatch, caplog) -> None:
+    fake_ort = types.SimpleNamespace(
+        get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        InferenceSession=ProviderSession,
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+
+    tracker = TrackNetV3Tracker("model.onnx", "onnxruntime")
+
+    assert tracker.degraded is True
+    assert "CUDAExecutionProvider" in tracker.session.requested
+    assert "runs on ['CPUExecutionProvider']" in caplog.text

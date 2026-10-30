@@ -6,7 +6,7 @@ import logging
 import random
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from queue import Empty, Full, Queue
 from threading import Event, Thread
 from typing import Protocol
@@ -156,6 +156,7 @@ class ShuttleWorker:
         *,
         max_gap: int = 1,
         background: MedianBackground | None = None,
+        executor: Executor | None = None,
     ) -> None:
         if max_gap < 0:
             raise ValueError("max_gap must be non-negative")
@@ -163,6 +164,12 @@ class ShuttleWorker:
         self.publisher = publisher
         self.max_gap = max_gap
         self.background = background
+        # None runs inference inline; run() passes the model-load thread so the frame
+        # loop and its heartbeat never wait on a slow model.
+        self.executor = executor
+        self._pending: (
+            tuple[ResizedFrame, Future[tuple[bool, list[float] | None, float | None, float]]] | None
+        ) = None
         self.frames: deque[ResizedFrame] = deque(maxlen=tracker.seq_len)
         self.last_frame_id: int | None = None
         self.last_heartbeat = 0.0
@@ -209,35 +216,82 @@ class ShuttleWorker:
         self.frames.append(current)
         self.last_frame_id = current.frame_id
 
-    def process(self, frame: Frame) -> None:
-        self.last_ts = frame.ts
-        started_ns = time.perf_counter_ns()
-        visible, px, confidence = False, None, None
-        try:
-            if self.background is not None:
-                self.background.submit(frame)
-            resized = self._resize_frame(frame)
-            self._append_window(resized)
-            background = self.background.get() if self.background is not None else None
-            if len(self.frames) == self.tracker.seq_len and background is not None:
-                visible, px, confidence = self.tracker.infer(tuple(self.frames), background)
-        except Exception:
-            # A bad model output or preprocessing frame degrades shuttle tracking only.
-            LOGGER.exception("Shuttle inference failed at frame %s", frame.frame_id)
-            visible, px, confidence = False, None, None
-        self.last_proc_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+    def _publish(
+        self,
+        frame_id: int,
+        ts: int,
+        visible: bool = False,
+        px: list[float] | None = None,
+        confidence: float | None = None,
+    ) -> None:
         self.publisher.send(
             ShuttleMessage(
-                frame_id=frame.frame_id,
-                ts=frame.ts,
-                visible=visible,
-                px=px,
-                conf=confidence,
+                frame_id=frame_id, ts=ts, visible=visible, px=px, conf=confidence
             ).to_json()
         )
         self.processed += 1
+
+    def _timed_infer(
+        self, frames: tuple[ResizedFrame, ...], background: np.ndarray
+    ) -> tuple[bool, list[float] | None, float | None, float]:
+        started_ns = time.perf_counter_ns()
+        visible, px, confidence = self.tracker.infer(frames, background)
+        return visible, px, confidence, (time.perf_counter_ns() - started_ns) / 1_000_000
+
+    def _start_inference(self, background: np.ndarray) -> None:
+        frames = tuple(self.frames)
+        if self.executor is None:
+            future: Future[tuple[bool, list[float] | None, float | None, float]] = Future()
+            try:
+                future.set_result(self._timed_infer(frames, background))
+            except Exception as exc:
+                future.set_exception(exc)
+        else:
+            future = self.executor.submit(self._timed_infer, frames, background)
+        self._pending = (frames[-1], future)
+
+    def _collect(self) -> None:
+        """Publish a finished inference; never waits."""
+        if self._pending is not None and self._pending[1].done():
+            frame, future = self._pending
+            self._pending = None
+            try:
+                visible, px, confidence, self.last_proc_ms = future.result()
+            except Exception:
+                # A bad model output degrades shuttle tracking only.
+                LOGGER.exception("Shuttle inference failed at frame %s", frame.frame_id)
+                visible, px, confidence = False, None, None
+            self._publish(frame.frame_id, frame.ts, visible, px, confidence)
+
+    def poll(self) -> None:
+        """Publish a finished inference and send a due heartbeat; never waits."""
+        self._collect()
         if time.monotonic() - self.last_heartbeat >= 1.0:
             self._heartbeat()
+
+    def process(self, frame: Frame) -> None:
+        self.last_ts = frame.ts
+        try:
+            if self.background is not None:
+                self.background.submit(frame)
+            self._append_window(self._resize_frame(frame))
+        except Exception:
+            LOGGER.exception("Shuttle preprocessing failed at frame %s", frame.frame_id)
+            self._publish(frame.frame_id, frame.ts)
+            self.poll()
+            return
+        self._collect()
+        if self._pending is None:
+            background = self.background.get() if self.background is not None else None
+            if len(self.frames) == self.tracker.seq_len and background is not None:
+                # The window snapshot is always the newest cached frames.
+                self._start_inference(background)
+            else:
+                # Not inferred: conf=null tells fusion this is not a "no shuttle" result.
+                self._publish(frame.frame_id, frame.ts)
+        # While inference is busy the frame is only cached, not published: a conf=null
+        # message per skipped frame would count as a miss in fusion's Kalman filter.
+        self.poll()
 
 
 def _load_and_warmup(settings: dict[str, object]) -> ShuttleTracker:
@@ -263,16 +317,17 @@ def run(config: AppConfig) -> None:
         create=False,
     )
     background: MedianBackground | None = None
+    # One model thread loads, warms up and infers, so this thread only publishes; it also
+    # keeps a TensorRT CUDA context on the thread that created it.
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shuttle-model")
     try:
-        # Keep publishing from this thread while model loading and warmup run elsewhere.
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="shuttle-model-load") as pool:
-            future = pool.submit(_load_and_warmup, settings)
+        future = pool.submit(_load_and_warmup, settings)
+        _send_startup_heartbeat(publisher)
+        while not future.done():
             _send_startup_heartbeat(publisher)
-            while not future.done():
-                _send_startup_heartbeat(publisher)
-                future_done = Event()
-                future_done.wait(1.0)
-            tracker = future.result()
+            future_done = Event()
+            future_done.wait(1.0)
+        tracker = future.result()
 
         background = MedianBackground(
             tracker.width,
@@ -285,6 +340,7 @@ def run(config: AppConfig) -> None:
             publisher,
             max_gap=int(settings["max_gap"]),
             background=background,
+            executor=pool,
         )
         idle_wait = Event()
         while True:
@@ -292,12 +348,12 @@ def run(config: AppConfig) -> None:
             if frame is None or (
                 worker.last_frame_id is not None and frame.frame_id <= worker.last_frame_id
             ):
-                if time.monotonic() - worker.last_heartbeat >= 1.0:
-                    worker._heartbeat()
+                worker.poll()
                 idle_wait.wait(0.001)
                 continue
             worker.process(frame)
     finally:
+        pool.shutdown(wait=False, cancel_futures=True)
         if background is not None:
             background.close()
         bus.close()
