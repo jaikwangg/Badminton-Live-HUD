@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import threading
 import time
@@ -10,11 +11,28 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from scipy.optimize import linear_sum_assignment
+
 from hud.bus.messages import HeartbeatMessage, HitMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import COURT_LENGTH_M, load_homography, transform_point
 
 _WORKERS = ("players", "shuttle", "audio")
 _NET_X_M = COURT_LENGTH_M / 2
+# ponytail: identity constants are not in config/default.yaml (T01-owned); move them there
+# once tuned on a real doubles clip. Window = past-only stand-in for the LESSONS +/-45 frames.
+_APP_WINDOW_FRAMES = 90
+_APP_WEIGHT_M = 2.0  # metres of position cost per unit of L1 appearance distance
+# Larger than any court distance plus appearance term, so the net line decides side first.
+_SIDE_MISMATCH_COST = 100.0
+
+
+def _min_cost_pairs(costs: list[list[float]]) -> list[tuple[int, int]]:
+    """Exact rectangular assignment (Hungarian); returns (row, col) pairs."""
+    # The players worker forwards everyone in the ROI, so detections can outnumber slots.
+    if not costs or not costs[0]:
+        return []
+    rows, cols = linear_sum_assignment(costs)
+    return list(zip(rows.tolist(), cols.tolist(), strict=True))
 
 
 def validate_game_state(value: dict[str, Any]) -> None:
@@ -91,6 +109,7 @@ class FusionState:
         self._player_config: dict[int, dict[str, Any]] = {}
         self._players: dict[int, dict[str, Any]] = {}
         self._player_history: dict[int, tuple[int, float, float]] = {}
+        self._app_history: dict[int, deque[list[float]]] = {}
         self._score: list[int | None] = [None, None]
         self._games: list[int | None] = [None, None]
         self._server: int | None = None
@@ -120,7 +139,7 @@ class FusionState:
         now = time.monotonic()
         with self._lock:
             if kind == "players":
-                decoded = PlayersMessage.from_json(payload)  # `app` is parsed but unused here
+                decoded = PlayersMessage.from_json(payload)
                 self._record_latency(decoded.ts)
                 if self._last_frame_id is not None and decoded.frame_id > self._last_frame_id + 1:
                     self._dropped += decoded.frame_id - self._last_frame_id - 1
@@ -132,39 +151,45 @@ class FusionState:
                 for player in self._players.values():
                     # Keep speed_mps so EMA smoothing survives; position fields go null.
                     player.update(tracked=False, img_xy=None, bbox=None, court_xy_m=None)
-                current_track_ids = {
-                    detection.track_id
+                detections = [
+                    (detection, self._court_point(detection.foot_px))
                     for detection in decoded.players
                     if detection.track_id is not None
+                ]
+                # Off-court feet carry no position, so such a track keeps its slot.
+                assigned = {
+                    detection.track_id: self._track_to_id[detection.track_id]
+                    for detection, court_xy in detections
+                    if court_xy is None and detection.track_id in self._track_to_id
                 }
-                self._track_to_id = {
-                    track_id: player_id
-                    for track_id, player_id in self._track_to_id.items()
-                    if track_id in current_track_ids
-                }
-                for detection in decoded.players:
-                    track_id = detection.track_id
-                    if track_id is None:
+                free = [s for s in range(self._player_count) if s not in assigned.values()]
+                positioned = [(d, xy) for d, xy in detections if xy is not None]
+                medians = {slot: self._app_median(slot) for slot in free}
+                costs = [
+                    [
+                        self._match_cost(slot, court_xy, detection.app, medians[slot])
+                        for slot in free
+                    ]
+                    for detection, court_xy in positioned
+                ]
+                for row, col in _min_cost_pairs(costs):
+                    assigned[positioned[row][0].track_id] = free[col]
+                for detection, court_xy in detections:
+                    free = [s for s in range(self._player_count) if s not in assigned.values()]
+                    if court_xy is None and detection.track_id not in assigned and free:
+                        assigned[detection.track_id] = free[0]
+                self._track_to_id = assigned
+                for detection, court_xy in detections:
+                    if detection.track_id not in assigned:
                         continue
-                    court_xy = (
-                        self._court_point(detection.foot_px)
-                        if self.homography is not None
-                        else None
-                    )
                     side = None if court_xy is None else int(court_xy[0] > _NET_X_M)
-                    if track_id not in self._track_to_id:
-                        occupied = set(self._track_to_id.values())
-                        available = set(range(self._player_count)) - occupied
-                        if not available:
-                            continue
-                        # Prefer free slots on the detection's side of the net.
-                        candidates = [
-                            slot for slot in available if self._slot_side(slot) == side
-                        ] or list(available)
-                        self._track_to_id[track_id] = min(
-                            candidates, key=lambda slot: self._slot_distance(slot, court_xy)
-                        )
-                    player_id = self._track_to_id[track_id]
+                    player_id = assigned[detection.track_id]
+                    apps = self._app_history.setdefault(player_id, deque(maxlen=_APP_WINDOW_FRAMES))
+                    # A length change (config edit) restarts the window instead of mixing.
+                    if detection.app is not None:
+                        if apps and len(apps[0]) != len(detection.app):
+                            apps.clear()
+                        apps.append(detection.app)
                     previous_player = self._players.get(player_id, {})
                     speed: float | None = None
                     distance: float | None = previous_player.get("dist_m")
@@ -255,6 +280,7 @@ class FusionState:
             if new_mode != self._mode:
                 self._players.clear()
                 self._player_history.clear()
+                self._app_history.clear()
                 self._track_to_id.clear()
             self._mode = new_mode
             # Legacy bodies without `team` keep the old meaning: team = starting side.
@@ -316,6 +342,11 @@ class FusionState:
             self._player_history[first], self._player_history[second] = (
                 self._player_history.get(second),
                 self._player_history.get(first),
+            )
+            # Appearance follows the track too, so the next match keeps the operator's swap.
+            self._app_history[first], self._app_history[second] = (
+                self._app_history.get(second, deque(maxlen=_APP_WINDOW_FRAMES)),
+                self._app_history.get(first, deque(maxlen=_APP_WINDOW_FRAMES)),
             )
             self._players[first], self._players[second] = (
                 self._players.get(second),
@@ -407,13 +438,29 @@ class FusionState:
             return player["side"]
         return self._player_config.get(slot, {}).get("side", slot % 2)
 
-    def _slot_distance(self, slot: int, court_xy: list[float] | None) -> tuple[float, int]:
-        # A new track id takes the free slot whose last known court position is nearest.
+    def _app_median(self, slot: int) -> list[float] | None:
+        # Per-frame appearance is too noisy (LESSONS 4); past frames only, as this is live.
+        history = self._app_history.get(slot)
+        if not history:
+            return None
+        return [statistics.median(values) for values in zip(*history, strict=True)]
+
+    def _match_cost(
+        self,
+        slot: int,
+        court_xy: list[float],
+        app: list[float] | None,
+        median: list[float] | None,
+    ) -> float:
+        side = int(court_xy[0] > _NET_X_M)
+        cost = 0.0 if self._slot_side(slot) == side else _SIDE_MISMATCH_COST
         previous = self._player_history.get(slot)
-        if previous is None or court_xy is None:
-            return (float("inf"), slot)
-        _, prev_x, prev_y = previous
-        return ((court_xy[0] - prev_x) ** 2 + (court_xy[1] - prev_y) ** 2, slot)
+        if previous is not None:
+            cost += math.dist(court_xy, previous[1:])
+        # Unknown appearance on either end falls back to position only.
+        if app is not None and median is not None and len(app) == len(median):
+            cost += _APP_WEIGHT_M * sum(abs(a - b) for a, b in zip(app, median, strict=True))
+        return cost
 
     def _court_point(self, point_px: list[float]) -> list[float] | None:
         if self.homography is None:
