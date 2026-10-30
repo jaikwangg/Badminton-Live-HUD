@@ -604,8 +604,11 @@ def test_confirm_point_maps_suggested_side_to_team_after_end_change(tmp_path) ->
     assert state.snapshot()["match"]["score"] == [1, 1]
 
 
-def test_shuttle_and_hits_drive_rally_shots_and_point_suggestion(tmp_path) -> None:
-    state = _doubles_after_end_change(tmp_path)
+_FRAME_NS = 16_666_667
+
+
+def _two_shot_rally(state: FusionState) -> tuple[int, list[dict]]:
+    """Player 2 (near) hits it up, player 0 (far) returns it; last seen at px [16, 40]."""
     feet = [(10.0, 1.0), (10.0, 5.0), (3.0, 1.0), (3.0, 5.0)]
     state.ingest(
         PlayersMessage(
@@ -614,16 +617,29 @@ def test_shuttle_and_hits_drive_rally_shots_and_point_suggestion(tmp_path) -> No
             players=[{"track_id": 10 + i, **_foot(*xy)} for i, xy in enumerate(feet)],
         ).to_json()
     )
-    frame_ns = 16_666_667
     ts = 1_000_000_000
-    # Player 2 (near) hits it up, player 0 (far) returns it, then it vanishes in the far half.
     path_y = [50 + 2 * i for i in range(10)] + [66 - 2 * i for i in range(24)]
     path_y += [22 + 2 * i for i in range(10)]
     events: list[dict] = []
     for y in path_y:
-        ts += frame_ns
+        ts += _FRAME_NS
         state.ingest(ShuttleMessage(frame_id=2, ts=ts, visible=True, px=[16.0, y]).to_json())
         events += state.snapshot()["events"]
+    return ts, events
+
+
+def _feed(state: FusionState, ts: int, frames: int, px: list[float] | None) -> tuple[int, list]:
+    events: list[dict] = []
+    for _ in range(frames):
+        ts += _FRAME_NS
+        state.ingest(ShuttleMessage(frame_id=3, ts=ts, visible=px is not None, px=px).to_json())
+        events += state.snapshot()["events"]
+    return ts, events
+
+
+def test_shuttle_and_hits_drive_rally_shots_and_point_suggestion(tmp_path) -> None:
+    state = _doubles_after_end_change(tmp_path)
+    ts, events = _two_shot_rally(state)
     snapshot = state.snapshot()
     assert snapshot["rally"]["active"] is True
     assert snapshot["rally"]["shots"] == 2
@@ -631,10 +647,8 @@ def test_shuttle_and_hits_drive_rally_shots_and_point_suggestion(tmp_path) -> No
     # last_shot is the answered shot (player 2's), whose speed is known once returned.
     assert snapshot["shuttle"]["last_shot"]["by"] == 2
     assert snapshot["shuttle"]["landing_xy_m_est"] is None  # still flying
-    for _ in range(130):  # > 1.8 s unseen ends the rally
-        ts += frame_ns
-        state.ingest(ShuttleMessage(frame_id=3, ts=ts, visible=False).to_json())
-        events += state.snapshot()["events"]
+    ts, lost_events = _feed(state, ts, 130, None)  # > 1.8 s unseen ends the rally
+    events += lost_events
     snapshot = state.snapshot()
     assert snapshot["shuttle"]["status"] == "lost"
     assert snapshot["rally"]["active"] is False
@@ -653,6 +667,55 @@ def test_shuttle_and_hits_drive_rally_shots_and_point_suggestion(tmp_path) -> No
     assert state.snapshot()["match"]["score"] == [None, 1]
 
 
+_REST_PX = [16.0, 80.0]  # near half, x ~ 2.68 m: the near side (1) loses instead
+
+
+def test_shuttle_resting_on_floor_ends_rally_with_rest_point_as_landing(tmp_path) -> None:
+    state = _doubles_after_end_change(tmp_path)
+    ts, events = _two_shot_rally(state)
+    # It drops and lies still (detections jitter by 4 px): tracked for rest_ms, then 'lost'
+    # until end_gap_ms runs out. The landing is the rest anchor, not the last jittered sighting.
+    for px, frames in ((_REST_PX, 1), ([16.0, 84.0], 149)):
+        ts, rest_events = _feed(state, ts, frames, px)
+        events += rest_events
+    snapshot = state.snapshot()
+    assert snapshot["rally"]["active"] is False
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["rally_start", "shot", "shot", "rally_end", "point_suggested"]
+    expected = [round(v, 2) for v in transform_point(state.homography, _REST_PX)]
+    point = events[-1]["data"]
+    assert point["landing_xy_m_est"] == expected
+    assert point["suggested_side"] == 1 and point["in_bounds"] is True
+    assert snapshot["shuttle"]["landing_xy_m_est"] == expected
+
+
+def test_rest_point_after_rally_end_replaces_pending_suggestion(tmp_path) -> None:
+    state = _doubles_after_end_change(tmp_path)
+    ts, _ = _two_shot_rally(state)
+    ts, events = _feed(state, ts, 130, None)
+    first = events[-1]
+    assert first["kind"] == "point_suggested" and first["data"]["suggested_side"] == 0
+    ts, events = _feed(state, ts, 40, _REST_PX)  # seen at rest within rest_landing_ms
+    assert [e["kind"] for e in events] == ["point_suggested"]
+    assert events[0]["ts"] == first["ts"] and events[0]["data"]["suggested_side"] == 1
+    assert list(state._pending_points) == [first["ts"]]
+    assert state._pending_points[first["ts"]]["suggested_side"] == 1
+    state.confirm_point(first["ts"], accept=True)
+    assert state.snapshot()["match"]["score"] == [1, None]  # side 1 is team 0 now
+
+
+def test_rest_point_after_operator_answered_does_not_reopen_suggestion(tmp_path) -> None:
+    state = _doubles_after_end_change(tmp_path)
+    ts, _ = _two_shot_rally(state)
+    ts, events = _feed(state, ts, 130, None)
+    point_ts = events[-1]["ts"]
+    state.confirm_point(point_ts, accept=False)
+    ts, events = _feed(state, ts, 40, _REST_PX)
+    assert events == [] and state._pending_points == {}
+    with pytest.raises(ValueError):
+        state.confirm_point(point_ts, accept=True)
+
+
 def test_slow_ws_client_keeps_events_from_dropped_frames() -> None:
     queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
     point = {"ts": 1, "kind": "point_suggested", "data": {}}
@@ -668,8 +731,14 @@ def test_fusion_tunables_come_from_config(tmp_path) -> None:
         tmp_path / "court_calib.json",
         fusion={
             "identity": {"app_window_frames": 5, "side_mismatch_cost": 50},
-            "rally": {"end_gap_ms": 500, "shot_match_window_ms": 80},
-            "shuttle": {"max_px_per_s": 3000, "predict_ms": 100},
+            "rally": {"end_gap_ms": 500, "shot_match_window_ms": 80, "rest_landing_ms": 2000},
+            "shuttle": {
+                "max_px_per_s": 3000,
+                "predict_ms": 100,
+                "direction_max_gap_ms": 300,
+                "rest_radius_px": 5,
+                "rest_ms": 600,
+            },
             "players": {"median_frames": 3, "deadband_m": 0.2},
         },
     )
@@ -683,6 +752,9 @@ def test_fusion_tunables_come_from_config(tmp_path) -> None:
     assert state._fsm.end_gap_ns == 500_000_000
     assert state._shots.match_window_ns == 80_000_000 and state._shots.refractory_ns == 200_000_000
     assert state._kf.max_px_per_s == 3000
+    assert state._kf.direction_max_gap_ns == 300_000_000
+    assert (state._kf.rest_radius_px, state._kf.rest_ns) == (5, 600_000_000)
+    assert state._fsm.rest_landing_ns == 2_000_000_000
     assert FusionState(tmp_path / "c.json", fusion={"shuttle": None})._kf.max_px_per_s is None
 
 
