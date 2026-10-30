@@ -7,7 +7,7 @@
     ▼
 [Frame bus] shared memory ring buffer (4 ช่อง เก็บเฉพาะเฟรมล่าสุด)
     ├─▶ [players worker]  YOLO + ByteTrack      ─┐
-    ├─▶ [shuttle worker]  TrackNetV3 (3 เฟรม)   ─┼─▶ ZeroMQ PUB/SUB (ipc)
+    ├─▶ [shuttle worker]  TrackNetV3 (8 เฟรม)   ─┼─▶ ZeroMQ PUB/SUB (ipc)
     └─▶ [audio worker]    จับเสียงตีลูก          ─┘          │
                                                             ▼
                                    [fusion] sync ด้วย capture_ts → homography → Kalman
@@ -54,7 +54,7 @@ Python 3.11 · YOLO11s-pose (Ultralytics, **AGPL-3.0**: ใช้ช่วง de
 | กล้อง → PC (SRT) | 40–60 |
 | decode + เขียนเข้า frame bus | 5 |
 | players / shuttle (ทำงานขนานกัน) | 10–15 |
-| หน้าต่าง 3 เฟรมของ TrackNet | +33 |
+| หน้าต่าง 8 เฟรมของ TrackNet (ใช้ heatmap ของเฟรมล่าสุด) | +0 |
 | fusion + ส่ง WS | 5 |
 | render overlay | 16 |
 
