@@ -14,9 +14,13 @@ models:
   shuttle:
     backend: onnxruntime
     path: models/shuttle.onnx
-    width: 512
-    height: 288
-    confidence: 0.5
+    confidence_threshold: 0.45
+    morph_kernel_size: 3
+    min_contour_area: 5.0
+    max_contour_area: 120.0
+    max_gap: 2
+    background_sample_count: 30
+    background_update_interval_s: 30.0
 bus:
   name: hud_frames
   slots: 4

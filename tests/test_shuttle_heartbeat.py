@@ -3,12 +3,24 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
+import numpy as np
+
 from hud.bus.messages import Frame
+from hud.models.shuttle import ResizedFrame
 from hud.workers.shuttle import ShuttleWorker
 
 
 class NullTracker:
-    def infer(self, frames: Sequence[Frame]) -> tuple[bool, list[float] | None, float | None]:
+    seq_len = 8
+    width = 2
+    height = 2
+
+    def warmup(self) -> None:
+        pass
+
+    def infer(
+        self, frames: Sequence[ResizedFrame], background: np.ndarray
+    ) -> tuple[bool, list[float] | None, float | None]:
         return False, None, None
 
 
