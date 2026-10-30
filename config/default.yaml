@@ -81,6 +81,7 @@ supervisor:
   restart_backoff_initial_s: 0.5  # first restart delay; doubles on each quick failure
   restart_backoff_max_s: 10
   restart_reset_after_s: 30  # a worker up this long counts as healthy; backoff starts over
+  stop_grace_s: 5  # after terminate, seconds a process gets to exit before it is killed
   logs_dir: logs  # supervisor.log and <worker>.log (stderr + non-heartbeat stdout); relative to cwd
   log_max_bytes: 10000000  # per log file before rotation
   log_backups: 3  # rotated files kept per log

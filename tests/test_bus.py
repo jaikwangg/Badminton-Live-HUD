@@ -108,6 +108,51 @@ def test_ring_readers_never_observe_torn_frames() -> None:
     assert not failures
 
 
+def test_ring_reader_never_sees_torn_header_from_writer_process() -> None:
+    # Threads cannot catch header tears (struct calls hold the GIL); a writer process can.
+    name = f"hud_test_{uuid.uuid4().hex}"
+    width, height = 8, 4
+    size = width * height * 3
+    ring = SharedFrameRing(name, width, height)
+    code = (
+        "import sys, time\n"
+        "from hud.bus.shm_ring import SharedFrameRing\n"
+        "class Image:\n"
+        f"    shape = ({height}, {width}, 3)\n"
+        "    def __init__(self, value): self.value = value\n"
+        f"    def tobytes(self, order='C'): return bytes([self.value]) * {size}\n"
+        f"ring = SharedFrameRing({name!r}, {width}, {height}, create=False)\n"
+        "end, index = time.monotonic() + 3, 0\n"
+        "while time.monotonic() < end:\n"
+        "    index += 1\n"
+        "    ring.write(Image(index % 251), index)\n"
+        "ring.close()\n"
+    )
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    writer = subprocess.Popen([sys.executable, "-c", code], env=env)
+    reads, bad = 0, []
+    try:
+        last_id = 0
+        while writer.poll() is None and len(bad) < 5:
+            frames = ring.read_since(last_id)
+            latest = ring.read_latest()
+            if frames:
+                last_id = frames[-1].frame_id
+            for frame in frames + ([latest] if latest else []):
+                reads += 1
+                expected = bytes([frame.frame_id % 251]) * size
+                dims = (frame.width, frame.height)
+                if dims != (width, height) or frame.image != expected or frame.ts != frame.frame_id:
+                    bad.append((frame.frame_id, frame.ts, frame.width, frame.height))
+    finally:
+        writer.kill()
+        writer.wait()
+        ring.close()
+        ring.unlink()
+    assert reads > 1000
+    assert bad == []
+
+
 def test_read_since_returns_newer_frames_oldest_first() -> None:
     name = f"hud_test_{uuid.uuid4().hex}"
     ring = SharedFrameRing(name, 4, 2)
