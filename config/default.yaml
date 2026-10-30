@@ -11,6 +11,9 @@ models:
     path: models/players.onnx
     input_size: 640
     confidence: 0.35
+    # Court ROI [x1, y1, x2, y2] as image fractions; only people whose feet are inside are
+    # forwarded. null = whole frame.
+    roi: null
     app:  # players[].app appearance vector (CONTRACTS.md)
       method: chest_color  # chest_color now; a re-ID model later
       length: 16  # fixed vector length: (length - 2) hue bins + dark and light fractions
@@ -34,7 +37,19 @@ models:
 bus:
   name: hud_frames
   slots: 4
+  # Worker PUB endpoints (read through hud.config.endpoint). null = platform default:
+  # ipc:///tmp/hud_<name> on Linux/macOS, tcp://127.0.0.1:5761/5762/5763 on Windows (no ipc).
+  endpoints:
+    players: null
+    shuttle: null
+    audio: null
+# Every process `python -m hud.supervisor` starts, in this order. A command starting with
+# `python` or `python3` runs with the supervisor's own interpreter (sys.executable).
+# heartbeat: false = the process prints no heartbeats; it is restarted only when it exits.
 workers:
+  capture:
+    enabled: true
+    command: [python, -m, hud.sources.capture]
   players:
     enabled: true
     command: [python, -m, hud.workers.players]
@@ -52,11 +67,27 @@ workers:
     refractory_ms: 150.0  # ignore further onsets this long after a hit
     sensitivity: 3.5  # onset threshold as a multiple of the adaptive noise floor
     queue_chunks: 8  # audio chunks buffered between callback and main thread
+  server:  # fusion + WebSocket + operator HTTP
+    enabled: true
+    heartbeat: false
+    command: [python, -m, hud.server.operator_api]
+  recorder:
+    enabled: true
+    heartbeat: false
+    command: [python, -m, hud.recorder.writer]
 supervisor:
   heartbeat_timeout_s: 3
   poll_interval_s: 0.25
   startup_grace_s: 30  # seconds a fresh worker may load (e.g. a model) before its first heartbeat
+  restart_backoff_initial_s: 0.5  # first restart delay; doubles on each quick failure
+  restart_backoff_max_s: 10
+  restart_reset_after_s: 30  # a worker up this long counts as healthy; backoff starts over
+  logs_dir: logs  # supervisor.log and <worker>.log (stderr + non-heartbeat stdout); relative to cwd
+  log_max_bytes: 10000000  # per log file before rotation
+  log_backups: 3  # rotated files kept per log
 fusion:
+  # Court calibration JSON; relative paths resolve against this config file's directory.
+  calibration_path: court_calib.json
   identity:
     app_window_frames: 90   # ~±45 frames per LESSONS §4; past frames only
     app_weight_m: 2.0       # metres of cost per unit L1 appearance distance; not tuned
