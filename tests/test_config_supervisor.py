@@ -60,18 +60,46 @@ def test_default_config_matches_code_defaults(monkeypatch: pytest.MonkeyPatch) -
 
     from hud.fusion.kalman import ShuttleKalmanFilter
     from hud.fusion.rally_fsm import RallyFSM
-    from hud.workers.shuttle import BACKGROUND_SAMPLE_SPAN_S
+    from hud.fusion.stats import ShotDetector
+    from hud.models.detector import YoloByteTrackDetector
+    from hud.workers.audio import RingClock, _replay_file
+    from hud.workers.shuttle import BACKGROUND_SAMPLE_SPAN_S, BACKGROUND_WARMUP_SPAN_S
 
     monkeypatch.delenv("HUD_DEFAULT_CONFIG", raising=False)
     config = load_config()
     kf = inspect.signature(ShuttleKalmanFilter).parameters
-    for key in ("direction_max_gap_ms", "rest_radius_px", "rest_ms"):
+    for key in ("direction_max_gap_ms", "rest_radius_px", "rest_ms", "turn_points"):
         assert config.fusion["shuttle"][key] == kf[key].default
+    rally = config.fusion["rally"]
     fsm = inspect.signature(RallyFSM).parameters
-    assert config.fusion["rally"]["rest_landing_ms"] == fsm["rest_landing_ms"].default
-    # FusionState's .get() fallbacks for fusion.players.
+    for key in ("rest_landing_ms", "serve_still_ms", "alternation"):
+        assert rally[key] == fsm[key].default
+    shots = inspect.signature(ShotDetector).parameters
+    assert rally["shot_refractory_ms"] == shots["refractory_ms"].default
+    assert rally["reach_ratio"] == shots["reach_ratio"].default
+    # FusionState's .get() fallbacks for fusion.players and fusion.identity.
     assert config.fusion["players"] == {"median_frames": 5, "deadband_m": 0.15}
-    assert config.models["shuttle"]["background_sample_span_s"] == BACKGROUND_SAMPLE_SPAN_S
+    identity = config.fusion["identity"]
+    assert (identity["net_slack_m"], identity["gallery_s"], identity["gallery_refresh"]) == (
+        1.0,
+        5.0,
+        0.002,
+    )
+    shuttle = config.models["shuttle"]
+    assert shuttle["background_sample_span_s"] == BACKGROUND_SAMPLE_SPAN_S
+    assert shuttle["background_warmup_span_s"] == BACKGROUND_WARMUP_SPAN_S
+    assert shuttle["crop"] is None
+    players = config.models["players"]
+    detector = inspect.signature(YoloByteTrackDetector).parameters
+    assert players["tiles"] == detector["tiles"].default
+    assert players["tile_merge_iou"] == detector["tile_merge_iou"].default
+    audio = config.workers["audio"]
+    ring = inspect.signature(RingClock).parameters
+    assert audio["ring_jump_ms"] == ring["jump_ms"].default
+    assert audio["ring_window"] == ring["window"].default
+    replay = inspect.signature(_replay_file).parameters
+    assert audio["ring_poll_s"] == replay["poll_s"].default
+    assert audio["max_lag_ms"] == replay["max_lag_ms"].default
 
 
 HEARTBEAT_COMMAND = [
