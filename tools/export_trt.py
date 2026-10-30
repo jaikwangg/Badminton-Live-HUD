@@ -1,4 +1,4 @@
-"""Export official TrackNetV3 checkpoint weights to ONNX and optionally TensorRT."""
+"""Export TrackNetV3 and/or YOLO weights to ONNX and optionally a TensorRT engine."""
 
 from __future__ import annotations
 
@@ -122,24 +122,44 @@ def build_engine(onnx_path: Path, engine_path: Path, *, fp16: bool) -> None:
     print(f"engine: {engine_path}")
 
 
+def export_yolo_onnx(weights: Path, *, imgsz: int) -> Path:
+    """Export Ultralytics YOLO weights to ONNX next to the weights file."""
+    from ultralytics import YOLO
+
+    onnx_path = Path(YOLO(str(weights)).export(format="onnx", imgsz=imgsz, opset=17))
+    print(f"yolo_onnx: {onnx_path}")
+    return onnx_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--repo", required=True, type=Path, help="External official TrackNetV3 clone"
-    )
-    parser.add_argument("--ckpt", required=True, type=Path, help="TrackNet_best.pt checkpoint")
-    parser.add_argument("--onnx", required=True, type=Path, help="Output ONNX file")
-    parser.add_argument("--engine", type=Path, help="Optional TensorRT engine output")
+    parser.add_argument("--repo", type=Path, help="External official TrackNetV3 clone")
+    parser.add_argument("--ckpt", type=Path, help="TrackNet_best.pt checkpoint")
+    parser.add_argument("--onnx", type=Path, help="Output TrackNet ONNX file")
+    parser.add_argument("--engine", type=Path, help="Optional TrackNet TensorRT engine output")
+    parser.add_argument("--yolo", type=Path, help="YOLO .pt weights to export via Ultralytics")
+    parser.add_argument("--yolo-engine", type=Path, help="Optional YOLO TensorRT engine output")
+    parser.add_argument("--imgsz", type=int, default=640, help="YOLO input size")
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=288)
     parser.add_argument("--fp16", action="store_true")
     args = parser.parse_args()
     if args.width < 1 or args.height < 1:
         parser.error("--width and --height must be positive")
+    tracknet = (args.repo, args.ckpt, args.onnx)
+    if any(tracknet) and not all(tracknet):
+        parser.error("TrackNet export needs --repo, --ckpt and --onnx together")
+    if not all(tracknet) and args.yolo is None:
+        parser.error("nothing to export: give --repo/--ckpt/--onnx and/or --yolo")
 
-    export_onnx(args.repo, args.ckpt, args.onnx, width=args.width, height=args.height)
-    if args.engine is not None:
-        build_engine(args.onnx, args.engine, fp16=args.fp16)
+    if all(tracknet):
+        export_onnx(args.repo, args.ckpt, args.onnx, width=args.width, height=args.height)
+        if args.engine is not None:
+            build_engine(args.onnx, args.engine, fp16=args.fp16)
+    if args.yolo is not None:
+        yolo_onnx = export_yolo_onnx(args.yolo, imgsz=args.imgsz)
+        if args.yolo_engine is not None:
+            build_engine(yolo_onnx, args.yolo_engine, fp16=args.fp16)
 
 
 if __name__ == "__main__":
