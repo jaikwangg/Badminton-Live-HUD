@@ -4,14 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import math
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+from hud.config import AppConfig, endpoint
 from hud.fusion.state import FusionState
 
 # ponytail: a client stalled this many events behind loses the oldest ones; raise if seen.
 _MAX_CARRIED_EVENTS = 256
+_BROADCAST_HZ = 30  # CONTRACTS: Fusion -> Clients at 30 Hz
+
+
+async def run_at_rate(
+    tick: Callable[[], None],
+    hz: float,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Call ``tick`` on a fixed monotonic grid of 1/hz; a late tick skips missed slots."""
+    period = 1 / hz
+    deadline = clock()
+    while True:
+        tick()
+        deadline += period
+        now = clock()
+        if deadline < now:  # late by a full period or more: drop the missed ticks
+            deadline += math.ceil((now - deadline) / period) * period
+        await sleep(deadline - now)
 
 
 def offer_latest(queue: asyncio.Queue[dict[str, Any]], snapshot: dict[str, Any]) -> None:
@@ -43,16 +65,14 @@ def create_ws_app(state: FusionState) -> Any:
     globals()["WebSocket"] = WebSocket
     clients: set[asyncio.Queue[dict[str, Any]]] = set()
 
-    async def broadcast() -> None:
-        while True:
-            snapshot = state.snapshot()
-            for queue in tuple(clients):
-                offer_latest(queue, snapshot)
-            await asyncio.sleep(1 / 30)
+    def broadcast() -> None:
+        snapshot = state.snapshot()
+        for queue in tuple(clients):
+            offer_latest(queue, snapshot)
 
     @asynccontextmanager
     async def lifespan(_app: Any) -> AsyncIterator[None]:
-        task = asyncio.create_task(broadcast())
+        task = asyncio.create_task(run_at_rate(broadcast, _BROADCAST_HZ))
         try:
             yield
         finally:
@@ -84,7 +104,7 @@ def create_ws_app(state: FusionState) -> Any:
     return app
 
 
-async def ingest_worker_messages(state: FusionState) -> None:
+async def ingest_worker_messages(state: FusionState, config: AppConfig) -> None:
     """Subscribe to bounded worker PUB sockets and update fusion state."""
     try:
         import zmq
@@ -99,7 +119,7 @@ async def ingest_worker_messages(state: FusionState) -> None:
         socket.setsockopt(zmq.LINGER, 0)
         socket.setsockopt(zmq.RCVHWM, 4)
         socket.setsockopt(zmq.SUBSCRIBE, b"")
-        socket.connect(f"ipc:///tmp/hud_{worker}")
+        socket.connect(endpoint(config, worker))
         poller.register(socket, zmq.POLLIN)
         sockets.append(socket)
     try:

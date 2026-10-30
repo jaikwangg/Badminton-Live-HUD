@@ -94,7 +94,7 @@ class FusionState:
 
     def __init__(
         self,
-        calibration_path: str | Path = "config/court_calib.json",
+        calibration_path: str | Path,
         fusion: dict[str, Any] | None = None,
     ) -> None:
         self._lock = threading.RLock()
@@ -143,16 +143,40 @@ class FusionState:
         }
         self._rally = {"active": False, "n": 0, "t_ms": 0, "shots": 0}
         self._ts = 0
-        self._last_frame_id: int | None = None
-        self._dropped = 0
-        self._fps = 0.0
-        self._frame_times: deque[float] = deque(maxlen=120)
+        # health.fps / health.dropped. Capture heartbeats reach only the supervisor (stdout),
+        # so fusion derives both from the capture frame_id and capture ts that every model
+        # worker message carries:
+        # - fps = capture frame rate = frame_id advance / capture-ts span over the newest
+        #   frames any model worker (players, shuttle) published.
+        # - dropped = captured frames the slowest model worker skipped: per worker, the sum
+        #   of frame_id gaps in its own stream; the max over workers is reported.
+        self._last_frame_ids: dict[str, int] = {}
+        self._skipped: dict[str, int] = {"players": 0, "shuttle": 0}
+        self._capture_frames: deque[tuple[int, int]] = deque(maxlen=120)
 
     def _record_latency(self, ts: int) -> None:
         now_ns = time.monotonic_ns()
         if 0 < ts <= now_ns:
             self._latencies_ms.append((now_ns - ts) / 1_000_000)
         self._ts = max(self._ts, ts)
+
+    def _record_frame(self, worker: str, frame_id: int, ts: int) -> None:
+        last = self._last_frame_ids.get(worker)
+        if last is not None and frame_id > last + 1:
+            self._skipped[worker] += frame_id - last - 1
+        self._last_frame_ids[worker] = frame_id
+        frames = self._capture_frames
+        if not frames or frame_id > frames[-1][0]:
+            frames.append((frame_id, ts))
+        elif ts > frames[-1][1]:  # newer capture time but lower id: capture restarted
+            frames.clear()
+            frames.append((frame_id, ts))
+
+    def _capture_fps(self) -> float | None:
+        if len(self._capture_frames) < 2:
+            return None
+        (first_id, first_ts), (last_id, last_ts) = self._capture_frames[0], self._capture_frames[-1]
+        return (last_id - first_id) * 1e9 / (last_ts - first_ts) if last_ts > first_ts else None
 
     def ingest(self, payload: str | bytes) -> None:
         message = json.loads(payload)
@@ -162,13 +186,7 @@ class FusionState:
             if kind == "players":
                 decoded = PlayersMessage.from_json(payload)
                 self._record_latency(decoded.ts)
-                if self._last_frame_id is not None and decoded.frame_id > self._last_frame_id + 1:
-                    self._dropped += decoded.frame_id - self._last_frame_id - 1
-                self._last_frame_id = decoded.frame_id
-                self._frame_times.append(now)
-                if len(self._frame_times) > 1:
-                    elapsed = self._frame_times[-1] - self._frame_times[0]
-                    self._fps = (len(self._frame_times) - 1) / elapsed if elapsed else 0.0
+                self._record_frame("players", decoded.frame_id, decoded.ts)
                 for player in self._players.values():
                     # Keep speed_mps so EMA smoothing survives; position fields go null.
                     player.update(tracked=False, img_xy=None, bbox=None, court_xy_m=None)
@@ -248,6 +266,7 @@ class FusionState:
             elif kind == "shuttle":
                 decoded = ShuttleMessage.from_json(payload)
                 self._record_latency(decoded.ts)
+                self._record_frame("shuttle", decoded.frame_id, decoded.ts)
                 res = self._kf.update(decoded.visible, decoded.px, decoded.ts)
                 self._shuttle.update(status=res.status, img_xy=res.px)
                 self._fsm.on_shuttle_update(res.status, self._kf.last_seen_px, decoded.ts)
@@ -448,10 +467,10 @@ class FusionState:
                 "shuttle": json.loads(json.dumps(self._shuttle)),
                 "events": list(events),
                 "health": {
-                    "fps": self._fps,
+                    "fps": self._capture_fps(),
                     "latency_ms_p50": p50,
                     "latency_ms_p99": p99,
-                    "dropped": self._dropped,
+                    "dropped": max(self._skipped.values()),
                     "workers": health_workers,
                 },
             }

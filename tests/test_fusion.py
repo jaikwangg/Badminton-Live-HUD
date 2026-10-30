@@ -10,7 +10,7 @@ from hud.bus.messages import HeartbeatMessage, PlayersMessage, ShuttleMessage
 from hud.fusion.homography import compute_homography, transform_point
 from hud.fusion.state import FusionState, _min_cost_pairs, validate_game_state
 from hud.server.operator_api import create_operator_app
-from hud.server.ws_server import create_ws_app, offer_latest
+from hud.server.ws_server import create_ws_app, ingest_worker_messages, offer_latest, run_at_rate
 
 
 def test_homography_maps_reference_corners_within_one_centimeter() -> None:
@@ -56,8 +56,8 @@ def test_state_matches_contract_and_emits_null_unknowns(tmp_path) -> None:
         validate_game_state(snapshot)
 
 
-def test_worker_without_recent_heartbeat_is_reported_down() -> None:
-    state = FusionState()
+def test_worker_without_recent_heartbeat_is_reported_down(tmp_path) -> None:
+    state = FusionState(tmp_path / "court_calib.json")
     state.ingest(
         PlayersMessage(
             frame_id=1,
@@ -143,8 +143,8 @@ def test_doubles_court_points_use_full_doubles_width(tmp_path) -> None:
     assert snapshot["players"][3]["court_xy_m"][1] == pytest.approx(6.039)
 
 
-def test_players_require_two_or_four_with_one_or_two_per_side() -> None:
-    state = FusionState()
+def test_players_require_two_or_four_with_one_or_two_per_side(tmp_path) -> None:
+    state = FusionState(tmp_path / "court_calib.json")
     with pytest.raises(ValueError, match="exactly 2"):
         state.set_players([{"id": 0, "name": "A", "color": "#fff", "side": 0}])
     with pytest.raises(ValueError, match="Each side"):
@@ -170,8 +170,10 @@ def test_players_require_two_or_four_with_one_or_two_per_side() -> None:
         )
 
 
-def test_point_confirmation_scores_only_accepted_suggestions_and_reset_clears_rally() -> None:
-    state = FusionState()
+def test_point_confirmation_scores_only_accepted_suggestions_and_reset_clears_rally(
+    tmp_path,
+) -> None:
+    state = FusionState(tmp_path / "court_calib.json")
     state.suggest_point(10, 0)
     state.confirm_point(10, accept=True)
     assert state.snapshot()["match"]["score"] == [1, None]
@@ -644,3 +646,96 @@ def test_fusion_tunables_come_from_config(tmp_path) -> None:
     assert state._shots.match_window_ns == 80_000_000 and state._shots.refractory_ns == 200_000_000
     assert state._kf.max_px_per_s == 3000
     assert FusionState(tmp_path / "c.json", fusion={"shuttle": None})._kf.max_px_per_s is None
+
+
+def test_health_fps_is_capture_rate_and_dropped_is_slowest_worker_skips(tmp_path) -> None:
+    state = FusionState(tmp_path / "court_calib.json")
+    assert state.snapshot()["health"]["fps"] is None
+    # Capture at 60 fps (ts step 1/60 s); players sees every 2nd frame, shuttle every frame.
+    for frame_id in range(0, 61):
+        ts = 1_000_000_000 + frame_id * 1_000_000_000 // 60
+        state.ingest(ShuttleMessage(frame_id=frame_id, ts=ts).to_json())
+        if frame_id % 2 == 0:
+            state.ingest(PlayersMessage(frame_id=frame_id, ts=ts, players=[]).to_json())
+    health = state.snapshot()["health"]
+    assert health["fps"] == pytest.approx(60.0, rel=1e-3)
+    assert health["dropped"] == 30
+    # Capture restart: frame ids start over at a later capture ts.
+    state.ingest(ShuttleMessage(frame_id=0, ts=10_000_000_000).to_json())
+    state.ingest(ShuttleMessage(frame_id=30, ts=11_000_000_000).to_json())
+    assert state.snapshot()["health"]["fps"] == pytest.approx(30.0)
+
+
+def test_run_at_rate_holds_30_hz_on_a_fake_clock_and_skips_when_late() -> None:
+    now = [100.0]
+    ticks: list[float] = []
+
+    def tick() -> None:
+        ticks.append(now[0])
+        # Each tick costs 5 ms; tick 10 stalls 100 ms (three periods).
+        now[0] += 0.1 if len(ticks) == 10 else 0.005
+
+    async def sleep(seconds: float) -> None:
+        assert seconds >= 0
+        now[0] += seconds + 0.012  # every wake-up is 12 ms late (Windows timer granularity)
+        if len(ticks) >= 100:
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_at_rate(tick, 30, clock=lambda: now[0], sleep=sleep))
+    period = 1 / 30
+    slots = [round((t - 100.0) / period, 6) for t in ticks]
+    # Ticks are never early, stay within the wake-up lateness of the grid, never drift ...
+    assert all(0 <= s - round(s) < 0.012 / period + 1e-6 for s in slots)
+    # ... and the stall skips the missed slots instead of bursting to catch up.
+    assert [round(s) for s in slots[:12]] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 14]
+    assert round(slots[-1]) == 102  # 100 ticks: slots 0-9, then 13-102
+
+
+def test_ingest_connects_to_configured_worker_endpoints(tmp_path, monkeypatch) -> None:
+    import zmq.asyncio
+
+    from hud.config import AppConfig, BusConfig
+
+    connected: list[str] = []
+    real_socket = zmq.asyncio.Context.socket
+
+    def socket(self, kind):
+        sock = real_socket(self, kind)
+        sock.connect = connected.append
+        return sock
+
+    monkeypatch.setattr(zmq.asyncio.Context, "socket", socket)
+    config = AppConfig(bus=BusConfig(endpoints={"players": "tcp://127.0.0.1:59001"}))
+
+    async def run() -> None:
+        task = asyncio.create_task(ingest_worker_messages(FusionState(tmp_path / "c.json"), config))
+        await asyncio.sleep(0.05)
+        task.cancel()
+
+    asyncio.run(run())
+    assert connected[0] == "tcp://127.0.0.1:59001"
+    assert connected[1:] and all(not e.startswith("tcp://127.0.0.1:59001") for e in connected[1:])
+
+
+def test_serve_builds_state_with_configured_calibration_path(tmp_path, monkeypatch) -> None:
+    import uvicorn
+
+    import hud.server.ws_server as ws_server
+    from hud.server import operator_api
+
+    calibration = tmp_path / "calib" / "court.json"
+    config_path = tmp_path / "hud.yaml"
+    config_path.write_text("fusion:\n  calibration_path: calib/court.json\n", encoding="utf-8")
+    seen: dict[str, FusionState] = {}
+
+    async def fake_ingest(state, _config) -> None:
+        seen["state"] = state
+
+    async def fake_serve(self) -> None:
+        return None
+
+    monkeypatch.setattr(ws_server, "ingest_worker_messages", fake_ingest)
+    monkeypatch.setattr(uvicorn.Server, "serve", fake_serve)
+    asyncio.run(operator_api.serve(str(config_path)))
+    assert seen["state"].calibration_path == calibration
