@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ class SourceConfig:
 class BusConfig:
     name: str = "hud_frames"
     slots: int = 4
+    # Worker PUB endpoints by worker name; a missing or null entry uses the platform default.
+    endpoints: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -31,6 +34,12 @@ class SupervisorConfig:
     heartbeat_timeout_s: float = 3.0
     poll_interval_s: float = 0.25
     startup_grace_s: float = 30.0
+    restart_backoff_initial_s: float = 0.5
+    restart_backoff_max_s: float = 10.0
+    restart_reset_after_s: float = 30.0
+    logs_dir: str = "logs"
+    log_max_bytes: int = 10_000_000
+    log_backups: int = 3
 
 
 @dataclass(slots=True)
@@ -43,6 +52,27 @@ class AppConfig:
     fusion: dict[str, Any] = field(default_factory=dict)
     server: dict[str, Any] = field(default_factory=dict)
     recording: dict[str, Any] = field(default_factory=dict)
+
+
+# pyzmq on Windows has no ipc:// transport, so workers fall back to fixed loopback ports.
+_WINDOWS_PORTS = {"players": 5761, "shuttle": 5762, "audio": 5763}
+
+
+def endpoint(config: AppConfig, name: str) -> str:
+    """ZeroMQ endpoint of worker ``name``: ``bus.endpoints[name]`` or the platform default."""
+    configured = config.bus.endpoints.get(name)
+    if configured:
+        return configured
+    if sys.platform == "win32":
+        return f"tcp://127.0.0.1:{_WINDOWS_PORTS[name]}"
+    return f"ipc:///tmp/hud_{name}"
+
+
+def _resolve_paths(values: dict[str, Any], base_dir: Path) -> None:
+    """Resolve file paths in one config file against that file's directory."""
+    fusion = values.get("fusion")
+    if isinstance(fusion, dict) and fusion.get("calibration_path"):
+        fusion["calibration_path"] = str(base_dir / fusion["calibration_path"])
 
 
 def _merge_defaults(values: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
@@ -76,10 +106,12 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     if default_path is not None:
         with default_path.open(encoding="utf-8") as stream:
             defaults = yaml.safe_load(stream) or {}
+        _resolve_paths(defaults, default_path.resolve().parent)
     user_values: dict[str, Any] = {}
     if path is not None:
         with Path(path).open(encoding="utf-8") as stream:
             user_values = yaml.safe_load(stream) or {}
+        _resolve_paths(user_values, Path(path).resolve().parent)
     values = _merge_defaults(user_values, defaults)
     return AppConfig(
         source=SourceConfig(**values.get("source", {})),

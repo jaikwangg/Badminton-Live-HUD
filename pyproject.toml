@@ -27,6 +27,8 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 models = ["ultralytics>=8.0", "onnxruntime>=1.16"]
 # tools/export_trt.py only.
 export = ["torch>=2.0", "onnx>=1.14"]
+# Process CPU/RAM sampling in tools/benchmark.py and tools/soak_test.py.
+perf = ["psutil>=5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

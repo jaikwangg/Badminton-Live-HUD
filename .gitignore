@@ -12,4 +12,5 @@ dist/
 *.pt
 *.mp4
 recordings/
+logs/
 .playwright-mcp/
